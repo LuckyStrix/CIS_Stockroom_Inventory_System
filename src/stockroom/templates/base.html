@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Stockroom{% endblock %} · CIS Stockroom</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>📦</text></svg>">
+</head>
+<body>
+<div class="topbar"><div class="inner">
+  <a class="brand" href="/">CIS <span>Stockroom</span></a>
+  <nav>
+    <a href="/" {% if path == '/' %}class="active"{% endif %}>Dashboard</a>
+    <a href="/items" {% if path.startswith('/items') %}class="active"{% endif %}>Items</a>
+    <a href="/loans" {% if path.startswith('/loans') %}class="active"{% endif %}>Checked out</a>
+    <a href="/people" {% if path.startswith('/people') %}class="active"{% endif %}>People</a>
+    <a href="/history" {% if path.startswith('/history') %}class="active"{% endif %}>History</a>
+    <a href="/public/" target="_blank" rel="noopener">Public page ↗</a>
+  </nav>
+  <div class="who">
+    {% if actor %}
+      {{ actor.name }} · <a href="/whoami?next={{ path }}">change</a>
+    {% else %}
+      <a href="/whoami?next={{ path }}">Sign in</a>
+    {% endif %}
+  </div>
+</div></div>
+
+<main>
+  {% if ok %}<div class="flash ok">{{ ok }}</div>{% endif %}
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

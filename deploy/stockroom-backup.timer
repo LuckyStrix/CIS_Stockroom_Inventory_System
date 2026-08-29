@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly stockroom database snapshot
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+# The Pi may well be off at 02:30; catch up on the next boot.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

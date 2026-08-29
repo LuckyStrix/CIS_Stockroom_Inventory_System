@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}History{% endblock %}
+{% block content %}
+
+<h1>History</h1>
+<p class="lede">
+  Every change ever made, newest first. {{ summary.event_count }} entries recorded.
+  {% if item %}Filtered to <a href="/items/{{ item.id }}">{{ item.name }}</a>.{% endif %}
+</p>
+
+<div class="filters">
+  <form method="get" action="/history">
+    {% if item %}<input type="hidden" name="item_id" value="{{ item.id }}">{% endif %}
+    <input type="search" name="actor" value="{{ actor_filter }}" placeholder="Filter by who…" aria-label="Actor">
+    <select name="action" aria-label="Action">
+      <option value="">Every action</option>
+      {% for a in actions %}
+      <option value="{{ a }}" {% if a == action_filter %}selected{% endif %}>{{ a }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn secondary">Filter</button>
+    {% if actor_filter or action_filter %}<a class="chip" href="/history">Clear</a>{% endif %}
+  </form>
+</div>
+
+<div class="card">
+  <ul class="timeline">
+    {% for event in events %}
+    <li class="{{ event.action|event_class }}">
+      <div class="when">
+        {{ event.at|datetime }} · {{ event.actor }} · <span class="mono">{{ event.action }}</span>
+      </div>
+      <div class="what">
+        {% if event.item_id %}<a href="/items/{{ event.item_id }}">{{ event.summary }}</a>
+        {% else %}{{ event.summary }}{% endif %}
+      </div>
+      {% if event.changes %}
+      <div class="diff">
+        {% for field, change in event.changes.items() %}
+          <code>{{ field }}</code>: {{ change['from']|show }} → {{ change['to']|show }}{% if not loop.last %} · {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+    </li>
+    {% else %}
+    <li class="muted">No matching history.</li>
+    {% endfor %}
+  </ul>
+</div>
+
+<div class="pagination">
+  {% if offset > 0 %}
+    <a class="btn secondary small" href="{{ page_url(offset - limit) }}">← Newer</a>
+  {% endif %}
+  {% if has_more %}
+    <a class="btn secondary small" href="{{ page_url(offset + limit) }}">Older →</a>
+  {% endif %}
+  <span class="muted">Showing {{ offset + 1 }}–{{ offset + events|length }}</span>
+</div>
+{% endblock %}

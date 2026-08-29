@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ code }}{% endblock %}
+{% block content %}
+<div class="card" style="max-width:520px">
+  <h1>{{ code }} — {{ title }}</h1>
+  <p class="lede">{{ message }}</p>
+  <div class="actions">
+    <a class="btn" href="/">Back to the dashboard</a>
+    <a class="btn secondary" href="/items">Items</a>
+  </div>
+</div>
+{% endblock %}

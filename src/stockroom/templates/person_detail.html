@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% from "_macros.html" import loan_rows with context %}
+{% block title %}{{ person.name }}{% endblock %}
+{% block content %}
+
+<h1>{{ person.name }}</h1>
+<p class="lede mono">{{ person.email }}</p>
+
+<div class="stats">
+  <div class="stat"><b>{{ open_loans|length }}</b><span>Items out</span></div>
+  <div class="stat"><b>{{ open_units }}</b><span>Units out</span></div>
+  <div class="stat"><b>{{ past_loans|length }}</b><span>Past loans</span></div>
+</div>
+
+<h2>Currently holding</h2>
+<div class="tablewrap">
+{% if open_loans %}
+<table>
+  <thead><tr><th>Item</th><th>Borrower</th><th class="num">Qty</th><th>Out since</th><th>Due</th><th></th></tr></thead>
+  <tbody>{{ loan_rows(open_loans, now) }}</tbody>
+</table>
+{% else %}<div class="empty">Nothing checked out.</div>{% endif %}
+</div>
+
+<h2>Past loans</h2>
+<div class="tablewrap">
+{% if past_loans %}
+<table>
+  <thead><tr><th>Item</th><th class="num">Qty</th><th>Out</th><th>Returned</th></tr></thead>
+  <tbody>
+    {% for loan in past_loans %}
+    <tr>
+      <td><a href="/items/{{ loan.item_id }}">{{ loan.item_name }}</a></td>
+      <td class="num">{{ loan.quantity }}</td>
+      <td class="nowrap muted">{{ loan.checked_out_at|datetime }}</td>
+      <td class="nowrap muted">{{ loan.returned_at|datetime }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}<div class="empty">No completed loans.</div>{% endif %}
+</div>
+
+<h2>History</h2>
+<div class="card">
+  <ul class="timeline">
+    {% for event in events %}
+    <li class="{{ event.action|event_class }}">
+      <div class="when">{{ event.at|datetime }} · {{ event.actor }}</div>
+      <div class="what">{{ event.summary }}</div>
+    </li>
+    {% else %}<li class="muted">Nothing recorded.</li>{% endfor %}
+  </ul>
+</div>
+{% endblock %}

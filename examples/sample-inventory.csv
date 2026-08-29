@@ -1,0 +1,11 @@
+name,description,quantity,unit,shelf,sub_location,barcode,product_url,min_quantity
+Canon EOS R5 Body,45MP full-frame mirrorless body. Battery and strap in the case.,2,Unit A,Shelf 1,Pelican 1510,,https://www.usa.canon.com/shop/p/eos-r5,1
+SanDisk Extreme 64GB SD,UHS-I V30 SD card for the R5 and the C70.,12,Unit B,Shelf 3,Bin 12,,,4
+Manfrotto 055 Tripod,Aluminium tripod with ball head. Check the leg locks on return.,4,Unit A,Floor,,,,1
+Thorlabs 30mm Cage Plate,SM1 threaded cage plate for optical breadboard work.,25,Unit C,Shelf 2,Drawer 4,,https://www.thorlabs.com,8
+X-Rite ColorChecker Passport,Two-target colour reference. Keep out of direct sunlight.,3,Unit B,Shelf 1,,,,1
+Ocean Optics USB2000+ Spectrometer,200-1100nm VIS-NIR spectrometer with USB cable and SpectraSuite key.,1,Unit C,Shelf 1,Case 2,,,
+Arduino Uno R3,Development board with USB-B cable.,15,Unit D,Shelf 4,Bin 2,,,5
+Aputure 120D II LED,Daylight-balanced COB light with Bowens mount and reflector.,6,Unit A,Shelf 2,,,,2
+Nikon AF-S 50mm f/1.8G,"Prime lens, F-mount. Front and rear caps included.",3,Unit B,Shelf 2,Foam insert,,,1
+Zoom H6 Recorder,Six-track field recorder with XY capsule and SD card.,2,Unit D,Shelf 1,,,,1

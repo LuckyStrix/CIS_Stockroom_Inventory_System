@@ -1,0 +1,20 @@
+[Unit]
+Description=Snapshot the stockroom database
+Documentation=file:/opt/stockroom/docs/operations.md
+
+[Service]
+Type=oneshot
+User=stockroom
+Group=stockroom
+WorkingDirectory=/opt/stockroom
+EnvironmentFile=/etc/stockroom.env
+
+# Uses SQLite's online backup API, so this is safe to run while the web
+# service is live. Old snapshots are pruned to STOCKROOM_BACKUP_KEEP.
+ExecStart=/opt/stockroom/.venv/bin/stockroom backup
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/stockroom

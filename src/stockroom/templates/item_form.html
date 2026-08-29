@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit" if item else "Add item" }}{% endblock %}
+{% block content %}
+
+<h1>{{ "Edit " + item.name if item else "Add an item" }}</h1>
+<p class="lede">
+  {% if item %}Every change is recorded in this item's history.
+  {% else %}A barcode is assigned automatically unless you enter one.{% endif %}
+</p>
+
+<form method="post" action="{{ '/items/' + item.id|string + '/edit' if item else '/items/new' }}">
+  <div class="card">
+    <div class="field">
+      <label for="name">Name</label>
+      <input id="name" name="name" required value="{{ item.name if item else '' }}"
+             placeholder="e.g. Canon EOS R5 Body">
+    </div>
+    <div class="field">
+      <label for="description">Description</label>
+      <textarea id="description" name="description"
+                placeholder="What it is, what comes with it, anything to check on return.">{{ item.description if item else '' }}</textarea>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="quantity">Total quantity</label>
+        <input id="quantity" name="quantity" type="number" min="0" required
+               value="{{ item.quantity if item else 1 }}">
+        <div class="hint">How many the stockroom owns, not how many are free.</div>
+      </div>
+      <div class="field">
+        <label for="min_quantity">Low-stock warning at</label>
+        <input id="min_quantity" name="min_quantity" type="number" min="0"
+               value="{{ item.min_quantity if item and item.min_quantity is not none else '' }}">
+        <div class="hint">Optional. Flags the item when availability drops this low.</div>
+      </div>
+    </div>
+  </div>
+
+  <fieldset>
+    <legend>Location</legend>
+    <div class="row">
+      <div class="field">
+        <label for="unit">Storage unit</label>
+        <input id="unit" name="unit" list="units" value="{{ item.unit if item else '' }}" placeholder="Unit B">
+        <datalist id="units">{% for u in units %}<option value="{{ u }}">{% endfor %}</datalist>
+      </div>
+      <div class="field">
+        <label for="shelf">Shelf</label>
+        <input id="shelf" name="shelf" value="{{ item.shelf if item else '' }}" placeholder="Shelf 3">
+      </div>
+      <div class="field">
+        <label for="sub_location">Further detail</label>
+        <input id="sub_location" name="sub_location"
+               value="{{ item.sub_location if item and item.sub_location else '' }}" placeholder="Bin 12">
+        <div class="hint">Optional third level: bin, drawer, case…</div>
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="card">
+    <div class="row">
+      <div class="field">
+        <label for="barcode">Barcode</label>
+        <input id="barcode" name="barcode" value="{{ item.barcode if item and item.barcode else '' }}"
+               placeholder="{{ 'leave blank to auto-assign' if not item else '' }}">
+        <div class="hint">Scan an existing manufacturer barcode, or leave blank.</div>
+      </div>
+      <div class="field">
+        <label for="product_url">Product link</label>
+        <input id="product_url" name="product_url" type="url"
+               value="{{ item.product_url if item and item.product_url else '' }}"
+               placeholder="https://…">
+      </div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn">{{ "Save changes" if item else "Add item" }}</button>
+    <a class="btn secondary" href="{{ '/items/' + item.id|string if item else '/items' }}">Cancel</a>
+  </div>
+</form>
+
+{% endblock %}

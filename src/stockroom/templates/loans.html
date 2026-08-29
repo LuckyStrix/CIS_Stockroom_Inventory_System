@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% from "_macros.html" import loan_rows with context %}
+{% block title %}Checked out{% endblock %}
+{% block content %}
+<h1>Checked out</h1>
+<p class="lede">{{ loans|length }} open loan(s){% if filter == 'overdue' %}, overdue only{% endif %}.</p>
+
+<div class="filters">
+  <a class="chip {% if filter != 'overdue' %}on{% endif %}" href="/loans">All open</a>
+  <a class="chip {% if filter == 'overdue' %}on{% endif %}" href="/loans?filter=overdue">Overdue</a>
+</div>
+
+<div class="tablewrap">
+{% if loans %}
+<table>
+  <thead><tr><th>Item</th><th>Borrower</th><th class="num">Qty</th><th>Out since</th><th>Due</th><th></th></tr></thead>
+  <tbody>{{ loan_rows(loans, now) }}</tbody>
+</table>
+{% else %}<div class="empty">Nothing is checked out.</div>{% endif %}
+</div>
+{% endblock %}

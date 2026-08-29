@@ -1,0 +1,7 @@
+# Runtime dependencies for the CIS Stockroom Inventory System.
+# Deliberately small -- this runs on a Raspberry Pi.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+jinja2>=3.1
+python-multipart>=0.0.9
+python-barcode>=0.15

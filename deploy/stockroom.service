@@ -1,0 +1,42 @@
+[Unit]
+Description=CIS Stockroom Inventory System
+Documentation=file:/opt/stockroom/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=stockroom
+Group=stockroom
+WorkingDirectory=/opt/stockroom
+EnvironmentFile=/etc/stockroom.env
+
+# --host 0.0.0.0 so the rest of the stockroom LAN can reach it. There is no
+# authentication (see docs/sso-integration.md); keep this off the open
+# internet until the Shibboleth work is done.
+ExecStart=/opt/stockroom/.venv/bin/uvicorn stockroom.web.app:app \
+    --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers
+
+# One worker on purpose. SQLite handles concurrent readers well but a single
+# writer; one process keeps the publish debounce and the write path simple,
+# and a stockroom's load is a handful of requests a minute.
+
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+# The service only ever needs to write its own data directory.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/stockroom
+StateDirectory=stockroom
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stockroom
+
+[Install]
+WantedBy=multi-user.target

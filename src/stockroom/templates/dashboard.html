@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% from "_macros.html" import item_rows, loan_rows with context %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+
+<form class="scan" action="/scan" method="get" role="search">
+  <input id="scan" name="code" type="search" autocomplete="off" autofocus
+         placeholder="Scan a barcode, or search by name / location…"
+         aria-label="Scan or search">
+  <button class="btn">Find</button>
+</form>
+
+<div class="stats">
+  <a class="stat" href="/items"><b>{{ summary.item_count }}</b><span>Item types</span></a>
+  <a class="stat" href="/items"><b>{{ summary.units_available }}</b><span>Available</span></a>
+  <a class="stat" href="/loans"><b>{{ summary.units_out }}</b><span>Checked out</span></a>
+  <a class="stat {% if summary.overdue_count %}alert{% endif %}" href="/loans?filter=overdue">
+    <b>{{ summary.overdue_count }}</b><span>Overdue</span></a>
+  <a class="stat {% if summary.low_stock_count %}alert{% endif %}" href="/items?filter=low">
+    <b>{{ summary.low_stock_count }}</b><span>Low stock</span></a>
+  <a class="stat" href="/history"><b>{{ summary.event_count }}</b><span>Logged changes</span></a>
+</div>
+
+{% if overdue %}
+<h2>Overdue</h2>
+<div class="tablewrap"><table>
+  <thead><tr><th>Item</th><th>Borrower</th><th class="num">Qty</th><th>Out since</th><th>Due</th><th></th></tr></thead>
+  <tbody>{{ loan_rows(overdue, now) }}</tbody>
+</table></div>
+{% endif %}
+
+{% if low_stock %}
+<h2>Low stock</h2>
+<div class="tablewrap"><table>
+  <thead><tr><th>Item</th><th>Location</th><th class="num">Available</th><th class="num">Total</th><th>Status</th></tr></thead>
+  <tbody>{{ item_rows(low_stock) }}</tbody>
+</table></div>
+{% endif %}
+
+<h2>Currently checked out{% if open_loans %} ({{ summary.open_loan_count }}){% endif %}</h2>
+{% if open_loans %}
+<div class="tablewrap"><table>
+  <thead><tr><th>Item</th><th>Borrower</th><th class="num">Qty</th><th>Out since</th><th>Due</th><th></th></tr></thead>
+  <tbody>{{ loan_rows(open_loans, now) }}</tbody>
+</table></div>
+{% if summary.open_loan_count > open_loans|length %}
+  <p class="muted"><a href="/loans">See all {{ summary.open_loan_count }} open loans →</a></p>
+{% endif %}
+{% else %}
+<div class="tablewrap"><div class="empty">Nothing is checked out right now.</div></div>
+{% endif %}
+
+<h2>Recent activity</h2>
+<div class="card">
+  <ul class="timeline">
+    {% for event in recent %}
+    <li class="{{ event.action|event_class }}">
+      <div class="when">{{ event.at|datetime }} · {{ event.actor }}</div>
+      <div class="what">{{ event.summary }}</div>
+    </li>
+    {% else %}
+    <li class="muted">Nothing has happened yet.</li>
+    {% endfor %}
+  </ul>
+  <p style="margin-bottom:0"><a href="/history">Full history →</a></p>
+</div>
+
+{% endblock %}

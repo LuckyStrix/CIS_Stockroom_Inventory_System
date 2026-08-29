@@ -1,0 +1,61 @@
+{# Shared fragments. Kept in one file so an item row looks the same
+   everywhere it appears. #}
+
+{% macro status_pill(item) %}
+  {% if item.is_archived %}
+    <span class="pill grey">Archived</span>
+  {% elif item.available <= 0 %}
+    <span class="pill out">{{ item.status_label }}</span>
+  {% elif item.is_low_stock %}
+    <span class="pill warn">Low stock</span>
+  {% else %}
+    <span class="pill ok">{{ item.status_label }}</span>
+  {% endif %}
+{% endmacro %}
+
+{% macro item_rows(items) %}
+  {% for item in items %}
+  <tr>
+    <td>
+      <a href="/items/{{ item.id }}"><strong>{{ item.name }}</strong></a>
+      {% if item.description %}<div class="muted" style="font-size:.85rem">{{ item.description|truncate(90) }}</div>{% endif %}
+      {% if item.barcode %}<div class="mono muted">{{ item.barcode }}</div>{% endif %}
+    </td>
+    <td class="nowrap">{{ item.location }}</td>
+    <td class="num">{{ item.available }}</td>
+    <td class="num">{{ item.quantity }}</td>
+    <td>{{ status_pill(item) }}</td>
+  </tr>
+  {% endfor %}
+{% endmacro %}
+
+{% macro loan_rows(loans, now, show_item=True) %}
+  {% for loan in loans %}
+  <tr>
+    {% if show_item %}
+    <td><a href="/items/{{ loan.item_id }}">{{ loan.item_name }}</a>
+      <div class="muted" style="font-size:.85rem">{{ loan.item_unit }} / {{ loan.item_shelf }}</div></td>
+    {% endif %}
+    <td><a href="/people/{{ loan.person_id }}">{{ loan.person_name }}</a>
+      <div class="muted mono">{{ loan.person_email }}</div></td>
+    <td class="num">{{ loan.quantity }}</td>
+    <td class="nowrap muted">{{ loan.checked_out_at|datetime }}</td>
+    <td class="nowrap">
+      {% if loan.due_at %}
+        {% if loan.is_overdue(now) %}<span class="pill out">Overdue {{ loan.due_at|date }}</span>
+        {% else %}<span class="muted">{{ loan.due_at|date }}</span>{% endif %}
+      {% else %}<span class="muted">—</span>{% endif %}
+    </td>
+    <td class="nowrap">
+      <form method="post" action="/loans/{{ loan.id }}/return" class="actions">
+        <input type="hidden" name="next" value="{{ next_url }}">
+        {% if loan.quantity > 1 %}
+          <input type="number" name="quantity" value="{{ loan.quantity }}" min="1"
+                 max="{{ loan.quantity }}" style="width:72px" aria-label="Quantity to return">
+        {% endif %}
+        <button class="btn small">Return</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+{% endmacro %}

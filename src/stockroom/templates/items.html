@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% from "_macros.html" import item_rows with context %}
+{% block title %}Items{% endblock %}
+{% block content %}
+
+<div style="display:flex;justify-content:space-between;align-items:start;gap:12px;flex-wrap:wrap">
+  <div>
+    <h1>Items</h1>
+    <p class="lede">{{ items|length }} shown{% if query %} matching “{{ query }}”{% endif %}.</p>
+  </div>
+  <div class="actions">
+    <a class="btn secondary" href="/labels">Print labels</a>
+    <a class="btn secondary" href="/export.csv">Export CSV</a>
+    <a class="btn" href="/items/new">Add item</a>
+  </div>
+</div>
+
+<div class="filters">
+  <form method="get" action="/items">
+    <input type="search" name="q" value="{{ query }}" placeholder="Search items…" aria-label="Search">
+    <select name="unit" aria-label="Storage unit">
+      <option value="">All units</option>
+      {% for u in units %}
+      <option value="{{ u }}" {% if u == unit %}selected{% endif %}>{{ u }}</option>
+      {% endfor %}
+    </select>
+    <input type="hidden" name="filter" value="{{ filter }}">
+    <button class="btn secondary">Apply</button>
+  </form>
+</div>
+
+<div class="filters">
+  {% for key, label in [('', 'All'), ('available', 'Available'), ('out', 'Checked out'), ('low', 'Low stock'), ('archived', 'Archived')] %}
+    <a class="chip {% if filter == key %}on{% endif %}"
+       href="/items?filter={{ key }}{% if query %}&q={{ query }}{% endif %}{% if unit %}&unit={{ unit }}{% endif %}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div class="tablewrap">
+{% if items %}
+<table>
+  <thead><tr><th>Item</th><th>Location</th><th class="num">Available</th><th class="num">Total</th><th>Status</th></tr></thead>
+  <tbody>{{ item_rows(items) }}</tbody>
+</table>
+{% else %}
+<div class="empty">
+  No items{% if query %} match that search{% endif %}.
+  <div style="margin-top:12px"><a class="btn" href="/items/new">Add an item</a></div>
+</div>
+{% endif %}
+</div>
+
+{% endblock %}

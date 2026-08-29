@@ -1,0 +1,13 @@
+# Local database and generated site -- never committed.
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/backups/
+publish/*
+!publish/.gitkeep
+
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en" data-generated="{{ generated_at }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stockroom Inventory — {{ org }}</title>
+<meta name="description" content="Live equipment availability for the {{ org }} stockroom.">
+<style>
+:root{
+  --bg:#f6f7f9; --surface:#fff; --line:#e3e6ea; --text:#14181d; --muted:#657084;
+  --accent:#f76902;            /* RIT orange */
+  --ok:#0f7b4f; --ok-bg:#e6f4ec;
+  --warn:#8a5a00; --warn-bg:#fdf3dc;
+  --out:#9c2a2a; --out-bg:#fbeaea;
+  --radius:10px;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#12151a; --surface:#1a1f26; --line:#2b323c; --text:#e8ecf1; --muted:#95a1b3;
+    --ok:#5fd39b; --ok-bg:#123027;
+    --warn:#e8be6a; --warn-bg:#33280f;
+    --out:#f08a8a; --out-bg:#3a1c1c;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-text-size-adjust:100%}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 18px 64px}
+header{border-bottom:3px solid var(--accent);padding-bottom:14px;margin-bottom:20px}
+h1{margin:0 0 4px;font-size:1.5rem;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:.9rem;margin:0}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:18px 0}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px}
+.stat b{display:block;font-size:1.5rem;line-height:1.2;font-variant-numeric:tabular-nums}
+.stat span{color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
+#q{flex:1 1 260px;min-width:0;padding:10px 12px;font-size:1rem;color:var(--text);
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--radius)}
+#q:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{background:var(--surface);border:1px solid var(--line);color:var(--muted);
+  border-radius:999px;padding:6px 13px;font-size:.85rem;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.tablewrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius)}
+table{border-collapse:collapse;width:100%;min-width:720px}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
+  cursor:pointer;user-select:none;white-space:nowrap;position:sticky;top:0;background:var(--surface)}
+th[aria-sort="ascending"]::after{content:" ▲";color:var(--accent)}
+th[aria-sort="descending"]::after{content:" ▼";color:var(--accent)}
+tbody tr:last-child td{border-bottom:0}
+.name{font-weight:600}
+.desc{color:var(--muted);font-size:.85rem;margin-top:2px;max-width:44ch}
+.loc{white-space:nowrap;font-size:.9rem}
+.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--muted)}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.pill{display:inline-block;border-radius:999px;padding:3px 10px;font-size:.78rem;font-weight:600;white-space:nowrap}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}
+.pill.warn{background:var(--warn-bg);color:var(--warn)}
+.pill.out{background:var(--out-bg);color:var(--out)}
+a{color:var(--accent)}
+.empty{padding:40px;text-align:center;color:var(--muted)}
+footer{margin-top:26px;color:var(--muted);font-size:.82rem;line-height:1.7}
+footer code{font-size:.8rem}
+@media (max-width:620px){ .desc{display:none} h1{font-size:1.25rem} }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Stockroom Inventory</h1>
+  <p class="sub">{{ org }}</p>
+</header>
+
+<section class="stats" aria-label="Summary">
+  <div class="stat"><b>{{ summary.item_count }}</b><span>Item types</span></div>
+  <div class="stat"><b>{{ summary.total_units }}</b><span>Total units</span></div>
+  <div class="stat"><b>{{ summary.units_available }}</b><span>Available</span></div>
+  <div class="stat"><b>{{ summary.units_out }}</b><span>Checked out</span></div>
+  <div class="stat"><b>{{ summary.low_stock_count }}</b><span>Low stock</span></div>
+</section>
+
+<div class="controls">
+  <input id="q" type="search" placeholder="Search name, description, location or barcode…"
+         autocomplete="off" aria-label="Search inventory">
+  <div class="chips" role="group" aria-label="Filter">
+    <button class="chip" data-filter="all" aria-pressed="true">All</button>
+    <button class="chip" data-filter="available" aria-pressed="false">Available</button>
+    <button class="chip" data-filter="out" aria-pressed="false">Checked out</button>
+    <button class="chip" data-filter="low" aria-pressed="false">Low stock</button>
+  </div>
+</div>
+
+<div class="tablewrap">
+  <table id="tbl">
+    <thead><tr>
+      <th data-sort="name" aria-sort="ascending">Item</th>
+      <th data-sort="location">Location</th>
+      <th data-sort="available" class="num">Available</th>
+      <th data-sort="quantity" class="num">Total</th>
+      <th data-sort="status">Status</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" hidden>No items match that search.</div>
+</div>
+
+<footer>
+  <p>
+    Generated {{ generated_at }} · {{ summary.event_count }} recorded changes ·
+    <a href="inventory.json">inventory.json</a>
+  </p>
+  <p>
+    This page is read-only and rebuilds automatically whenever the inventory
+    changes.{% if not show_borrowers %} It shows how many units are available,
+    not who has them.{% endif %} To check something out, or to ask about an item
+    that is fully out, contact the stockroom.
+  </p>
+</footer>
+</div>
+
+<script id="data" type="application/json">{{ data_json }}</script>
+<script>
+(function () {
+  "use strict";
+  var ITEMS = JSON.parse(document.getElementById("data").textContent);
+  var rowsEl = document.getElementById("rows");
+  var emptyEl = document.getElementById("empty");
+  var qEl = document.getElementById("q");
+  var filter = "all";
+  var sortKey = "name";
+  var sortDir = 1;
+
+  // Precompute one lowercase haystack per item so filtering stays cheap.
+  ITEMS.forEach(function (it) {
+    it._h = [it.name, it.description, it.location, it.barcode || ""]
+      .join(" ").toLowerCase();
+  });
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  function pillClass(it) {
+    if (it.available <= 0) return "out";
+    if (it.low_stock) return "warn";
+    return "ok";
+  }
+
+  function matches(it, terms) {
+    for (var i = 0; i < terms.length; i++) {
+      if (it._h.indexOf(terms[i]) === -1) return false;
+    }
+    if (filter === "available") return it.available > 0;
+    if (filter === "out") return it.out_qty > 0;
+    if (filter === "low") return it.low_stock;
+    return true;
+  }
+
+  function render() {
+    var terms = qEl.value.toLowerCase().split(/\s+/).filter(Boolean);
+    var list = ITEMS.filter(function (it) { return matches(it, terms); });
+
+    list.sort(function (a, b) {
+      var x = a[sortKey], y = b[sortKey];
+      if (typeof x === "string") { x = x.toLowerCase(); y = String(y).toLowerCase(); }
+      if (x < y) return -sortDir;
+      if (x > y) return sortDir;
+      return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1;
+    });
+
+    var html = list.map(function (it) {
+      var link = it.product_url
+        ? ' <a href="' + esc(it.product_url) + '" rel="noopener noreferrer nofollow" target="_blank">↗</a>'
+        : "";
+      var code = it.barcode ? '<div class="code">' + esc(it.barcode) + "</div>" : "";
+      var desc = it.description
+        ? '<div class="desc">' + esc(it.description) + "</div>" : "";
+      return "<tr>" +
+        '<td><div class="name">' + esc(it.name) + link + "</div>" + desc + code + "</td>" +
+        '<td class="loc">' + esc(it.location) + "</td>" +
+        '<td class="num">' + it.available + "</td>" +
+        '<td class="num">' + it.quantity + "</td>" +
+        '<td><span class="pill ' + pillClass(it) + '">' + esc(it.status) + "</span></td>" +
+        "</tr>";
+    }).join("");
+
+    rowsEl.innerHTML = html;
+    emptyEl.hidden = list.length !== 0;
+  }
+
+  qEl.addEventListener("input", render);
+
+  Array.prototype.forEach.call(document.querySelectorAll(".chip"), function (chip) {
+    chip.addEventListener("click", function () {
+      filter = chip.dataset.filter;
+      Array.prototype.forEach.call(document.querySelectorAll(".chip"), function (c) {
+        c.setAttribute("aria-pressed", String(c === chip));
+      });
+      render();
+    });
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll("th[data-sort]"), function (th) {
+    th.addEventListener("click", function () {
+      var key = th.dataset.sort;
+      sortDir = key === sortKey ? -sortDir : 1;
+      sortKey = key;
+      Array.prototype.forEach.call(document.querySelectorAll("th[data-sort]"), function (o) {
+        o.removeAttribute("aria-sort");
+      });
+      th.setAttribute("aria-sort", sortDir === 1 ? "ascending" : "descending");
+      render();
+    });
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

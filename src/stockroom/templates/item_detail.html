@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_pill, loan_rows with context %}
+{% block title %}{{ item.name }}{% endblock %}
+{% block content %}
+
+<div style="display:flex;justify-content:space-between;align-items:start;gap:12px;flex-wrap:wrap">
+  <div>
+    <h1>{{ item.name }} {{ status_pill(item) }}</h1>
+    <p class="lede">{{ item.description or "No description." }}</p>
+  </div>
+  <div class="actions">
+    <a class="btn secondary" href="/items/{{ item.id }}/edit">Edit</a>
+    {% if item.barcode %}<a class="btn secondary" href="/labels?ids={{ item.id }}">Label</a>{% endif %}
+    <a class="btn secondary" href="/history?item_id={{ item.id }}">History</a>
+  </div>
+</div>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Details</h2>
+    <dl class="kv">
+      <dt>Available</dt><dd><strong>{{ item.available }}</strong> of {{ item.quantity }}</dd>
+      <dt>Checked out</dt><dd>{{ item.out_qty }} across {{ item.open_loan_count }} loan(s)</dd>
+      <dt>Location</dt><dd>{{ item.location }}</dd>
+      <dt>Barcode</dt>
+      <dd>
+        {% if item.barcode %}<span class="mono">{{ item.barcode }}</span>
+        {% else %}
+          <form method="post" action="/items/{{ item.id }}/barcode" style="display:inline">
+            <button class="btn small secondary">Assign a barcode</button>
+          </form>
+        {% endif %}
+      </dd>
+      {% if item.min_quantity is not none %}
+      <dt>Low-stock at</dt><dd>{{ item.min_quantity }}</dd>
+      {% endif %}
+      {% if item.product_url %}
+      <dt>Product</dt><dd><a href="{{ item.product_url }}" target="_blank" rel="noopener nofollow">{{ item.product_url|truncate(48) }}</a></dd>
+      {% endif %}
+      <dt>Added</dt><dd class="muted">{{ item.created_at|datetime }}</dd>
+      <dt>Updated</dt><dd class="muted">{{ item.updated_at|datetime }}</dd>
+    </dl>
+
+    {% if item.barcode %}
+    <div class="barcode-cell" style="margin-top:16px">{{ barcode_svg|safe }}</div>
+    {% endif %}
+
+    <div class="actions" style="margin-top:16px">
+      {% if item.is_archived %}
+        <form method="post" action="/items/{{ item.id }}/restore">
+          <button class="btn secondary">Restore from archive</button></form>
+      {% else %}
+        <form method="post" action="/items/{{ item.id }}/archive"
+              onsubmit="return confirm('Archive {{ item.name }}? It stays in the history and can be restored.')">
+          <button class="btn secondary">Archive</button></form>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Check out</h2>
+    {% if item.is_archived %}
+      <p class="muted">This item is archived. Restore it before checking it out.</p>
+    {% elif item.available <= 0 %}
+      <p class="muted">All {{ item.quantity }} unit(s) are currently checked out.</p>
+    {% else %}
+    <form method="post" action="/items/{{ item.id }}/checkout">
+      <div class="field">
+        <label for="person">Borrower</label>
+        <input id="person" name="person_email" list="people" required
+               placeholder="name@rit.edu" autocomplete="off">
+        <datalist id="people">
+          {% for p in people %}<option value="{{ p.email }}">{{ p.name }}</option>{% endfor %}
+        </datalist>
+        <div class="hint">Pick an existing person, or type a new email address.</div>
+      </div>
+      <div class="field">
+        <label for="person_name">Name <span class="hint">(only needed for someone new)</span></label>
+        <input id="person_name" name="person_name" autocomplete="off">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="qty">Quantity</label>
+          <input id="qty" name="quantity" type="number" value="1" min="1" max="{{ item.available }}" required>
+          <div class="hint">{{ item.available }} available</div>
+        </div>
+        <div class="field">
+          <label for="due">Due back <span class="hint">(optional)</span></label>
+          <input id="due" name="due_at" type="date">
+        </div>
+      </div>
+      <div class="field">
+        <label for="note">Note <span class="hint">(optional)</span></label>
+        <input id="note" name="note" placeholder="e.g. for the senior project shoot">
+      </div>
+      <button class="btn">Check out</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+<h2>Currently out</h2>
+<div class="tablewrap">
+{% if open_loans %}
+<table>
+  <thead><tr><th>Borrower</th><th class="num">Qty</th><th>Out since</th><th>Due</th><th></th></tr></thead>
+  <tbody>{{ loan_rows(open_loans, now, show_item=False) }}</tbody>
+</table>
+{% else %}<div class="empty">Every unit is on the shelf.</div>{% endif %}
+</div>
+
+<h2>Loan history</h2>
+<div class="tablewrap">
+{% if past_loans %}
+<table>
+  <thead><tr><th>Borrower</th><th class="num">Qty</th><th>Out</th><th>Returned</th><th>Note</th></tr></thead>
+  <tbody>
+    {% for loan in past_loans %}
+    <tr>
+      <td><a href="/people/{{ loan.person_id }}">{{ loan.person_name }}</a></td>
+      <td class="num">{{ loan.quantity }}</td>
+      <td class="nowrap muted">{{ loan.checked_out_at|datetime }}</td>
+      <td class="nowrap muted">{{ loan.returned_at|datetime }}</td>
+      <td class="muted">{{ loan.return_note or loan.checkout_note or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}<div class="empty">This item has never been returned yet.</div>{% endif %}
+</div>
+
+{% endblock %}
