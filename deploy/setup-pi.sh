@@ -69,9 +69,41 @@ else
     say "Keeping the existing ${ENV_FILE}"
 fi
 
+# Read the env file the way systemd's EnvironmentFile= does, NOT the way bash
+# `source` does. They are not the same language: systemd takes everything after
+# the first `=` as a literal value, so an operator writing
+#
+#     STOCKROOM_ORG=Carlson Center for Imaging Science
+#
+# is perfectly valid to systemd and a syntax error to bash, which reads
+# `Center` as a command and dies with "Center: command not found" -- part-way
+# through the install, having already created the service account and the
+# database directory.
+#
+# Parsing also means this script never executes the contents of a file in
+# /etc as root, which sourcing did.
+load_env_file() {
+    local file="$1" line key value
+    [[ -r "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*($|#|\;) ]] && continue
+        [[ "$line" == *=* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key//[[:space:]]/}"
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        # Strip one layer of matching quotes, as systemd does.
+        if [[ "$value" == \"*\" && ${#value} -ge 2 ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "$value" == \'*\' && ${#value} -ge 2 ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+        export "$key=$value"
+    done < "$file"
+}
+
 say "Initialising the database"
-# Source rather than word-split the env file: STOCKROOM_ORG contains spaces.
-( set -a; . "$ENV_FILE"; set +a
+( load_env_file "$ENV_FILE"
   sudo -u "$SERVICE_USER" --preserve-env=STOCKROOM_DATA_DIR,STOCKROOM_PUBLISH_DIR,STOCKROOM_ORG \
       "$APP_DIR/.venv/bin/stockroom" init )
 

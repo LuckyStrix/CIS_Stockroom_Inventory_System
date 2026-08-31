@@ -118,6 +118,22 @@ $S sessions revoke an1234@rit.edu
 Every mutating command takes `--actor "Name <email>"`, which is what lands in
 the audit log. Without it, changes are attributed to `cli:<unix user>`.
 
+## Configuration
+
+Settings live in `/etc/stockroom.env`, installed from
+`deploy/stockroom.env.example`. **Quote every value.** The file is read by two
+parsers that do not agree: systemd takes everything after the first `=`
+literally, so an unquoted value containing spaces works in the running service
+but breaks any shell that reads the same file. Double quotes are right for
+both — systemd strips them.
+
+```bash
+STOCKROOM_ORG="Carlson Center for Imaging Science — RIT"   # correct
+STOCKROOM_ORG=Carlson Center for Imaging Science — RIT     # breaks the installer
+```
+
+`sudo systemctl restart stockroom` after editing it.
+
 ## Backups
 
 A snapshot is taken nightly at 02:30 into `/var/lib/stockroom/backups`, and
