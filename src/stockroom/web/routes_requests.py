@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
-from .. import db, requests_service as rq, service
+from .. import config, db, requests_service as rq, service
 from ..service import StockroomError
 from .deps import (
     Forbidden,
@@ -33,13 +33,22 @@ def inbox(request: Request, status: str = "", kind: str = ""):
     conn = get_conn()
     from .. import accounts as accounts_module
 
+    found = rq.list_requests(conn, status=status or None, kind=kind or None)
+    # Oldest pending first. The default ordering puts pending at the top but
+    # newest within it, which buries exactly the request that has been waiting
+    # longest -- and with no email, waiting unseen is the only way the request
+    # workflow actually fails.
+    found.sort(key=lambda r: (r.status != "pending", r.created_at))
+
     return page(
         request,
         "requests.html",
-        requests=rq.list_requests(conn, status=status or None, kind=kind or None),
+        requests=found,
         status_filter=status,
         kind_filter=kind,
         kinds=rq.KIND_LABELS,
+        stale_count=rq.count_stale(conn),
+        stale_days=config.REQUEST_STALE_DAYS,
         pending_account_list=accounts_module.list_accounts(conn, status="pending"),
         open_hours=rq.list_open_hours(conn),
         now=db.utcnow(),
@@ -151,11 +160,15 @@ def request_detail(request: Request, request_id: int):
     subject = rq.get_request(conn, request_id)
     if subject.requester_id != account.id and not account.is_staff:
         raise Forbidden("That request belongs to someone else.")
+    # Staff only: a requester has no business seeing who else asked.
+    overlaps = rq.overlapping_requests(conn, subject) if account.is_staff else []
     return page(
         request,
         "request_detail.html",
         subject=subject,
         item=service.get_item(conn, subject.item_id) if subject.item_id else None,
+        overlaps=overlaps,
+        competing_demand=rq.competing_demand(conn, subject) if overlaps else 0,
         now=db.utcnow(),
     )
 

@@ -33,7 +33,7 @@ apt-get update -qq
 # sqlite3 is only for poking at the database by hand; the app uses Python's
 # built-in module. git is needed only for the optional Pages publisher.
 apt-get install -y --no-install-recommends \
-    python3 python3-venv python3-pip sqlite3 git rsync avahi-daemon nginx openssl
+    python3 python3-venv python3-pip sqlite3 git rsync avahi-daemon nginx openssl rclone
 
 say "Creating the ${SERVICE_USER} service account"
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
@@ -57,7 +57,7 @@ python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install --quiet -e "$APP_DIR"
 
 say "Preparing ${DATA_DIR}"
-mkdir -p "$DATA_DIR/publish" "$DATA_DIR/backups"
+mkdir -p "$DATA_DIR/publish" "$DATA_DIR/backups" "$DATA_DIR/photos"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
 chown -R root:root "$APP_DIR"
 

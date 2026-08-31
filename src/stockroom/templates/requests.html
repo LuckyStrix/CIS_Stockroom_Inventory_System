@@ -33,6 +33,14 @@
 </div>
 {% endif %}
 
+{% if stale_count %}
+<div class="flash error">
+  {{ stale_count }} request{{ 's have' if stale_count != 1 else ' has' }} been
+  waiting more than {{ stale_days }} days. Nobody is notified of anything by
+  this system, so a request is only worked if someone here sees it.
+</div>
+{% endif %}
+
 <div class="filters">
   {% for key, label in [('', 'All'), ('pending', 'Pending'), ('approved', 'Approved'), ('fulfilled', 'Done'), ('declined', 'Declined')] %}
     <a class="chip {% if status_filter == key %}on{% endif %}"
@@ -48,7 +56,7 @@
 <div class="tablewrap">
 {% if requests %}
 <table>
-  <thead><tr><th>#</th><th>Type</th><th>What</th><th>Who</th><th>Status</th><th>Filed</th></tr></thead>
+  <thead><tr><th>#</th><th>Type</th><th>What</th><th>Who</th><th>Status</th><th>Waiting</th></tr></thead>
   <tbody>
     {% for r in requests %}
     <tr>
@@ -58,7 +66,14 @@
         {% if r.requester_note %}<div class="muted small">{{ r.requester_note|truncate(70) }}</div>{% endif %}</td>
       <td>{{ r.requester_name }}<div class="mono muted small">{{ r.requester_email }}</div></td>
       <td><span class="pill {{ r.status|status_class }}">{{ r.status }}</span></td>
-      <td class="nowrap muted">{{ r.created_at|datetime }}</td>
+      <td class="nowrap">
+        {% if r.is_stale %}
+          <span class="pill warn">Waiting {{ r.age_label }}</span>
+        {% else %}
+          <span class="muted">{{ r.age_label }}</span>
+        {% endif %}
+        <div class="muted small">{{ r.created_at|datetime }}</div>
+      </td>
     </tr>
     {% endfor %}
   </tbody>

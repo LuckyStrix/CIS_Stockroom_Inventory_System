@@ -6,9 +6,10 @@
 > its audit-log row in the same transaction. Nothing else writes to the
 > tables.**
 
-There are three service modules, following one rule between them:
-`service.py` (inventory), `accounts.py` (accounts and sessions) and
-`requests_service.py` (the request workflows). They are separate files only
+There are five service modules, following one rule between them:
+`service.py` (inventory, units, condition, photos), `accounts.py` (accounts
+and sessions), `requests_service.py` (the request workflows), `kits.py`
+(bundles) and `stocktake.py` (physical counts). They are separate files only
 because `service.py` already owns a lot; the guarantee is identical.
 
 This is the design decision the rest of the system is arranged around. Because
@@ -53,6 +54,12 @@ someone remembering it.
 | `schema.sql` | Tables, views, indexes. `schema_fts.sql` adds the search index |
 | `models.py` | Typed dataclasses over rows; no behaviour, no DB handle |
 | `service.py` | Inventory mutations. Invariants, validation, the audit log |
+| `kits.py` | Named bundles; expanded into basket lines, never lent as a unit |
+| `stocktake.py` | Physical counts; reconciliation is a read over `item_status` |
+| `reports.py` | Usage reads and SVG charts (no library: the CSP forbids one) |
+| `diagnostics.py` | Read-only health checks, shared by the CLI and `/diagnostics` |
+| `backup_targets.py` | A verified snapshot's second home: a USB stick, rclone |
+| `photos.py` | Decode, downscale, strip EXIF, write a fresh JPEG |
 | `accounts.py` | Accounts, passwords, sessions, lockout |
 | `requests_service.py` | The three request workflows and open hours |
 | `security.py` | scrypt hashing, tokens, CSRF, rate limiting (all stdlib) |

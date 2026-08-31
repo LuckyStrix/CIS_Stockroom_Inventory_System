@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>Reports</h1>
+    <p class="lede">
+      What the last {{ days }} days of the audit log add up to. This is the
+      material that answers “what should we buy next?” and “what can we stop
+      storing?” — the two questions a department asks before releasing money.
+    </p>
+  </div>
+  <div class="actions">
+    {% for value, label in [(90, '3 months'), (365, 'A year'), (1095, '3 years')] %}
+    <a class="btn secondary {% if days == value %}disabled{% endif %}"
+       href="/reports?days={{ value }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="stats">
+  <span class="stat"><b>{{ headline.loans }}</b><span>Checkouts</span></span>
+  <span class="stat"><b>{{ headline.units }}</b><span>Units lent</span></span>
+  <span class="stat"><b>{{ headline.borrowers }}</b><span>Borrowers</span></span>
+  <span class="stat {% if unaccounted %}alert{% endif %}">
+    <b>{{ unaccounted|sum(attribute='value')|int }}</b><span>Unaccounted</span></span>
+</div>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Borrowed most often</h2>
+    {% if most_borrowed %}
+      {{ chart(most_borrowed)|safe }}
+      <p class="flush muted small">
+        Counted in trips to the counter, not units — twenty cards on one loan
+        is one trip, and trips are what tell you what the stockroom is for.
+      </p>
+    {% else %}<p class="muted flush">Nothing borrowed in this window.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Typical time out</h2>
+    {% if durations %}
+      {{ chart(durations)|safe }}
+      <p class="flush muted small">
+        Median days, so one camera that spent a semester on a research project
+        does not distort the picture.
+      </p>
+    {% else %}<p class="muted flush">Nothing returned in this window yet.</p>{% endif %}
+  </div>
+</div>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Busiest weeks</h2>
+    {% if weeks %}{{ chart(weeks)|safe }}
+    {% else %}<p class="muted flush">Not enough history yet.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Busiest borrowers</h2>
+    {% if borrowers %}{{ chart(borrowers)|safe }}
+    {% else %}<p class="muted flush">Nobody has borrowed anything yet.</p>{% endif %}
+  </div>
+</div>
+
+<h2>Nobody has borrowed these</h2>
+<div class="tablewrap">
+{% if never_borrowed %}
+<table>
+  <thead><tr><th>Item</th><th class="num">Owned</th><th>Last seen out</th></tr></thead>
+  <tbody>
+    {% for row in never_borrowed %}
+    <tr>
+      <td><a href="/items/{{ row.item_id }}">{{ row.label }}</a></td>
+      <td class="num">{{ row.display }}</td>
+      <td class="muted">{{ row.detail }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Everything has been borrowed at least once in this window.</div>
+{% endif %}
+</div>
+<p class="muted small">
+  Shelf space is the scarcest thing in a stockroom, so this is the list to
+  walk before buying more storage — with judgement. A light meter borrowed
+  once every three years may still be exactly why the stockroom exists.
+</p>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Unaccounted for</h2>
+    {% if unaccounted %}
+    <table class="plain">
+      <tbody>
+        {% for row in unaccounted %}
+        <tr>
+          <td><a href="/items/{{ row.item_id }}">{{ row.label }}</a>
+            <div class="muted small">{{ row.detail }}</div></td>
+          <td class="num"><span class="pill out">{{ row.display }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted flush">Everything is accounted for.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Waiting on a repair</h2>
+    {% if out_of_service %}
+    <table class="plain">
+      <tbody>
+        {% for row in out_of_service %}
+        <tr>
+          <td><a href="/items/{{ row.item_id }}">{{ row.label }}</a>
+            <div class="muted small">{{ row.detail }}</div></td>
+          <td class="num"><span class="pill warn">{{ row.display }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted flush">Nothing is out of service.</p>{% endif %}
+  </div>
+</div>
+
+{% if offenders %}
+<h2>Returned late most often</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Person</th><th class="num">Late</th><th>Of their loans</th></tr></thead>
+  <tbody>
+    {% for row in offenders %}
+    <tr>
+      <td><a href="/people/{{ row.person_id }}">{{ row.label }}</a></td>
+      <td class="num">{{ row.display }}%</td>
+      <td class="muted">{{ row.detail }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted small">
+  Only people with three or more loans, and shown as a share rather than a
+  count — otherwise this would just list whoever borrows most. It is meant to
+  find the person who needs a word, not to rank anyone.
+</p>
+{% endif %}
+
+{% endblock %}

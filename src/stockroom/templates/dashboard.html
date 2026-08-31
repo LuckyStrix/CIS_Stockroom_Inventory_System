@@ -33,6 +33,10 @@
     <b>{{ summary.overdue_count }}</b><span>Overdue</span></a>
   <a class="stat {% if summary.low_stock_count %}alert{% endif %}" href="/items?filter=low">
     <b>{{ summary.low_stock_count }}</b><span>Low stock</span></a>
+  {% if summary.units_held %}
+  <a class="stat {% if summary.units_unaccounted %}alert{% endif %}" href="/items?filter=held">
+    <b>{{ summary.units_held }}</b><span>Out of service</span></a>
+  {% endif %}
   <a class="stat" href="/history"><b>{{ summary.event_count }}</b><span>Logged changes</span></a>
 </div>
 

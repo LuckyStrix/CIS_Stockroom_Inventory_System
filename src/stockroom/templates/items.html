@@ -20,7 +20,7 @@
     <input type="search" name="q" value="{{ query }}" placeholder="Search items…" aria-label="Search">
     <select name="unit" aria-label="Storage unit">
       <option value="">All units</option>
-      {% for u in units %}
+      {% for u in storage_units %}
       <option value="{{ u }}" {% if u == unit %}selected{% endif %}>{{ u }}</option>
       {% endfor %}
     </select>
@@ -30,7 +30,7 @@
 </div>
 
 <div class="filters">
-  {% for key, label in [('', 'All'), ('available', 'Available'), ('out', 'Checked out'), ('low', 'Low stock'), ('archived', 'Archived')] %}
+  {% for key, label in [('', 'All'), ('available', 'Available'), ('out', 'Checked out'), ('low', 'Low stock'), ('held', 'Out of service'), ('archived', 'Archived')] %}
     <a class="chip {% if filter == key %}on{% endif %}"
        href="/items?filter={{ key }}{% if query %}&q={{ query }}{% endif %}{% if unit %}&unit={{ unit }}{% endif %}">{{ label }}</a>
   {% endfor %}

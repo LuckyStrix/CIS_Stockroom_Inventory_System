@@ -19,8 +19,17 @@
   <div class="card">
     <h2>Details</h2>
     <dl class="kv">
-      <dt>Available</dt><dd><strong>{{ item.available }}</strong> of {{ item.quantity }}</dd>
+      <dt>Available</dt><dd><strong>{{ item.available }}</strong> of {{ item.quantity }} owned</dd>
       <dt>Checked out</dt><dd>{{ item.out_qty }} across {{ item.open_loan_count }} loan(s)</dd>
+      {% if item.held_qty %}
+      <dt>Out of service</dt>
+      <dd>
+        {{ item.held_qty }}
+        {% if item.unaccounted_qty %}
+          <span class="pill out">{{ item.unaccounted_qty }} unaccounted for</span>
+        {% endif %}
+      </dd>
+      {% endif %}
       <dt>Location</dt><dd>{{ item.location }}</dd>
       <dt>Barcode</dt>
       <dd>
@@ -43,10 +52,10 @@
     </dl>
 
     {% if item.barcode %}
-    <div class="barcode-cell" class="mt">{{ barcode_svg|safe }}</div>
+    <div class="barcode-cell mt">{{ barcode_svg|safe }}</div>
     {% endif %}
 
-    <div class="actions" class="mt">
+    <div class="actions mt">
       {% if item.is_archived %}
         <form method="post" action="/items/{{ item.id }}/restore">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -102,6 +111,228 @@
     {% endif %}
   </div>
 </div>
+
+<h2>Photos</h2>
+<div class="grid two">
+  <div class="card">
+    {% if photos %}
+    <div class="photos">
+      {% for photo in photos %}
+      <figure class="photo{% if photo.is_primary %} main{% endif %}">
+        <img src="{{ photo.url }}" alt="{{ photo.alt }}" loading="lazy"
+             width="{{ photo.width }}" height="{{ photo.height }}">
+        <figcaption>
+          {% if photo.caption %}{{ photo.caption }}{% endif %}
+          <span class="actions">
+            {% if not photo.is_primary %}
+            <form method="post" action="/photos/{{ photo.id }}/primary" class="inline">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <button class="linkbutton">Make main</button>
+            </form>
+            {% else %}<span class="pill ok tiny">Main</span>{% endif %}
+            <form method="post" action="/photos/{{ photo.id }}/remove" class="inline"
+                  data-confirm="Remove this photo?">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <button class="linkbutton">Remove</button>
+            </form>
+          </span>
+        </figcaption>
+      </figure>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted flush">
+      No photos yet. “Is this the right cable?” is a photo question — a
+      picture of the connector answers it better than any description.
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Add a photo</h2>
+    {# _csrf must be the FIRST field: the CSRF middleware scans only the head
+       of a multipart body rather than reading megabytes of image data. See
+       web/app.py::_submitted_csrf and test_the_csrf_field_comes_first. #}
+    <form method="post" action="/items/{{ item.id }}/photos"
+          enctype="multipart/form-data">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="photo">Picture</label>
+        <input id="photo" name="photo" type="file" accept="image/*" required>
+        <div class="hint">
+          Taken on a phone is fine — it is shrunk to 1600px and stripped of
+          location data before it is stored.
+        </div>
+      </div>
+      <div class="field">
+        <label for="caption">Caption <span class="hint">(optional)</span></label>
+        <input id="caption" name="caption" placeholder="e.g. the USB-C end">
+      </div>
+      <button class="btn">Upload</button>
+    </form>
+  </div>
+</div>
+
+{% if kits_using %}
+<div class="card">
+  <h2>Used in kits</h2>
+  <p class="flush">
+    {% for kit in kits_using %}
+    <a href="/kits/{{ kit.id }}">{{ kit.name }}</a>{% if not loop.last %} · {% endif %}
+    {% endfor %}
+  </p>
+</div>
+{% endif %}
+
+<h2>Condition</h2>
+<div class="grid two">
+  <div class="card {% if holds %}attention{% endif %}">
+    <h2>Out of service</h2>
+    {% if holds %}
+    <table class="plain">
+      <tbody>
+        {% for hold in holds %}
+        <tr>
+          <td>
+            <strong>{{ hold.what }}</strong>
+            <span class="pill {{ hold.state|hold_class }}">{{ hold.state_label }}</span>
+            {% if hold.note %}<div class="muted small">{{ hold.note }}</div>{% endif %}
+            <div class="muted small">
+              Since {{ hold.opened_at|date }}, recorded by {{ hold.opened_by }}
+              {% if hold.borrower_name %}
+                · came back like this from {{ hold.borrower_name }}
+              {% endif %}
+            </div>
+          </td>
+          <td class="nowrap">
+            <form method="post" action="/holds/{{ hold.id }}/state" class="actions">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <select name="state" class="compact" aria-label="Change condition">
+                {% for value, label in hold_states.items() %}
+                <option value="{{ value }}" {% if value == hold.state %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+              <button class="btn small secondary">Update</button>
+            </form>
+            <form method="post" action="/holds/{{ hold.id }}/close" class="mt"
+                  data-confirm="Put {{ hold.what }} back on the shelf as available?">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <button class="btn small">Back in service</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted flush">Everything the stockroom owns is fit to lend.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Record a problem</h2>
+    {% if item.available <= 0 %}
+      <p class="muted flush">
+        Nothing is on the shelf to take out of service. Something has to come
+        back first.
+      </p>
+    {% else %}
+    <form method="post" action="/items/{{ item.id }}/holds">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="row">
+        <div class="field">
+          <label for="state">Condition</label>
+          <select id="state" name="state" required>
+            {% for value, label in hold_states.items() %}
+            <option value="{{ value }}">{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% if item.is_tracked %}
+        <div class="field">
+          <label for="unit_id">Which one</label>
+          <select id="unit_id" name="unit_id" required>
+            {% for u in units %}
+              {% if u.is_available %}<option value="{{ u.id }}">{{ u.label }}</option>{% endif %}
+            {% endfor %}
+          </select>
+        </div>
+        {% else %}
+        <div class="field">
+          <label for="hold_qty">How many</label>
+          <input id="hold_qty" name="quantity" type="number" value="1" min="1"
+                 max="{{ item.available }}" required>
+          <div class="hint">{{ item.available }} on the shelf</div>
+        </div>
+        {% endif %}
+      </div>
+      <div class="field">
+        <label for="hold_note">What happened <span class="hint">(optional)</span></label>
+        <input id="hold_note" name="note" placeholder="e.g. bent lens mount, dropped on the roof">
+      </div>
+      <button class="btn">Take out of service</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+{% if item.is_tracked %}
+<h2>Individual units</h2>
+<div class="tablewrap">
+{% if units %}
+<table>
+  <thead><tr><th>Asset tag</th><th>Serial</th><th>Condition</th><th>Note</th><th></th></tr></thead>
+  <tbody>
+    {% for u in units %}
+    <tr>
+      <td class="mono">{{ u.asset_tag|show }}</td>
+      <td class="mono muted">{{ u.serial|show }}</td>
+      <td><span class="pill {{ u.state|hold_class }}">{{ u.state_label }}</span></td>
+      <td class="muted">{{ u.state_note or u.note or "—" }}</td>
+      <td class="nowrap">
+        <form method="post" action="/units/{{ u.id }}/retire"
+              data-confirm="Retire {{ u.label }}? Its history is kept.">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <button class="btn small secondary">Retire</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">
+  No units registered yet. This item is set to track each one individually,
+  so add them below — until then availability is still counted from the
+  quantity.
+</div>
+{% endif %}
+</div>
+
+<div class="card">
+  <h2>Register a unit</h2>
+  <form method="post" action="/items/{{ item.id }}/units">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="row">
+      <div class="field">
+        <label for="asset_tag">Asset tag</label>
+        <input id="asset_tag" name="asset_tag" placeholder="scan or type"
+               autocomplete="off">
+        <div class="hint">Its own scannable code, separate from the item barcode.</div>
+      </div>
+      <div class="field">
+        <label for="serial">Serial number</label>
+        <input id="serial" name="serial" autocomplete="off">
+      </div>
+    </div>
+    <div class="field">
+      <label for="unit_note">Note <span class="hint">(optional)</span></label>
+      <input id="unit_note" name="note" placeholder="e.g. the one with the sticky dial">
+    </div>
+    <button class="btn">Register</button>
+  </form>
+</div>
+{% endif %}
 
 <h2>Currently out</h2>
 <div class="tablewrap">

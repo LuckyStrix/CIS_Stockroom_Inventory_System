@@ -33,6 +33,49 @@ Every open loan has a **Return** button — on the item page, the person's page,
 and the "Checked out" list. For a multi-unit loan, change the number before
 clicking to record a partial return.
 
+### Work a queue at the counter
+
+**Counter.** Scan everything into the basket, say who it is for, check out.
+The whole basket is one transaction: if any line cannot go out, none of it
+does and the basket is still on screen to be corrected. A saved **kit** drops
+its whole contents in with one click.
+
+**Counter → Returns** does the same in reverse: pick the person, untick
+anything they are keeping, and hand back the rest in one go.
+
+Something that comes back damaged is better returned from the item page or
+with the condition dropdown on the return row, so the fault is recorded
+against the right loan — that is what makes "who had it when it broke"
+answerable later.
+
+### Say that something is broken
+
+On the item page, **Record a problem**: broken, in repair, missing, or written
+off. Those units stop being lendable and the public page stops advertising
+them, but the quantity owned does not change — the stockroom still bought ten
+of them, and "we own ten, two are unaccounted for" is the sentence that gets a
+replacement budgeted.
+
+Put it back with **Back in service** when it returns from repair.
+
+### Count the shelves
+
+**Stocktake.** Pick a storage unit (a whole room at once is rarely realistic),
+then walk it with a scanner. When you finish, you get a list of everything the
+shelves and the database disagree about.
+
+Nothing is applied automatically. The most common cause of a missing scan is a
+missed scan, so recording something as missing is a deliberate click — and it
+opens a hold you can close again the moment the thing turns up.
+
+### Check the system is still alive
+
+**Health** in the navigation, or `stockroom doctor` on the Pi. It runs
+nightly as part of the backup job, so a failure shows up in
+`systemctl status stockroom-backup`. It checks the database, the audit chain,
+the search index, disk space, and whether backups are actually happening —
+including whether any of them are leaving the machine.
+
 ### Add an item
 
 **Items → Add item.** A barcode is assigned automatically unless you type one
@@ -82,15 +125,55 @@ the most recent 30 are kept (`STOCKROOM_BACKUP_KEEP`). It uses SQLite's online
 backup API, so it is safe while the service is running — unlike copying the
 `.db` file, which can catch a half-written WAL.
 
+Every snapshot is **verified** before it counts: the new file is reopened and
+run through `PRAGMA integrity_check`, and a snapshot that fails is deleted
+rather than kept. A database corrupted by a failing SD card copies without
+complaint, so an unverified nightly job produces a month of unusable files and
+reports success every single night.
+
 ```bash
 systemctl list-timers stockroom-backup.timer   # when it next runs
 sudo systemctl start stockroom-backup.service  # run one now
 ls -lh /var/lib/stockroom/backups
 ```
 
-**Copy backups off the Pi.** They are on the same SD card as the database, so
-they do not protect against the card failing — which is the most likely way
-this system dies. A cron job on another machine is enough:
+### Getting a copy off the SD card
+
+Backups on the same card as the database do not protect against the card
+failing, which is the most likely way this system dies. Set either or both of
+these in `/etc/stockroom.env`; `stockroom doctor` warns while neither is
+configured.
+
+**A USB stick left in the Pi:**
+
+```bash
+STOCKROOM_BACKUP_COPY_DIR=/mnt/stockroom-usb
+```
+
+**Google Drive, or anything else rclone speaks.** rclone is a single binary
+with its own OAuth flow; the application never handles a token. Set it up once
+as the service user, because that is where the app expects the config:
+
+```bash
+sudo apt install rclone
+sudo -u stockroom rclone config          # create the remote, do the OAuth
+sudo -u stockroom /opt/stockroom/.venv/bin/stockroom backup
+```
+
+```bash
+STOCKROOM_BACKUP_REMOTE=gdrive:stockroom-backups
+STOCKROOM_BACKUP_REMOTE_KEEP=30
+```
+
+> **What ends up in that Drive folder is a readable copy of the whole
+> database** — every email address and the entire audit log. Keep it private
+> to the account that owns it, and do not share the link.
+
+An upload failure never invalidates the local snapshot, but it does make the
+command exit non-zero, so a Drive upload that has quietly stopped working
+shows up as a failed unit rather than as silence.
+
+Pulling from another machine still works too, and needs nothing on the Pi:
 
 ```bash
 rsync -az stockroom-admin@cis-stockroom.local:/var/lib/stockroom/backups/ ~/stockroom-backups/

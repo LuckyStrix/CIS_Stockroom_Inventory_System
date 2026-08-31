@@ -9,7 +9,7 @@ import inspect
 
 import pytest
 
-from stockroom import accounts, requests_service, service
+from stockroom import accounts, kits, requests_service, service, stocktake
 from stockroom.service import Actor, ConflictError
 
 # Every public mutating function across the three service modules, and how to
@@ -19,16 +19,33 @@ MUTATIONS = {
     "create_item", "update_item", "archive_item", "restore_item",
     "assign_barcode", "create_person", "update_person", "get_or_create_person",
     "checkout", "return_loan",
+    "create_unit", "update_unit", "retire_unit",
+    "open_hold", "change_hold", "close_hold",
+    "checkout_many", "return_many", "merge_people",
+    "add_photo", "set_primary_photo", "remove_photo",
 }
 
 # accounts.py and requests_service.py follow the same rule as service.py. They
 # are separate modules only because service.py owns inventory and was already
 # long -- the audit guarantee is identical, so the guard covers all three.
-AUDITED_MODULES = (service, accounts, requests_service)
+AUDITED_MODULES = (service, accounts, requests_service, kits, stocktake)
 
 ACCOUNT_MUTATIONS = {
     "register", "approve", "set_status", "set_role", "change_password",
     "login", "logout", "revoke_all_sessions",
+}
+
+KIT_MUTATIONS = {
+    "create_kit", "update_kit", "set_kit_contents", "archive_kit", "restore_kit",
+}
+
+# record_scan is deliberately absent from the audit rule's usual shape: it
+# takes an actor but writes no event, because a thousand-item count would bury
+# the inventory history it exists to protect. Its scans live in
+# stocktake_scan, and the session itself is audited at start and finish. This
+# is the second documented exception, alongside the session heartbeat.
+STOCKTAKE_MUTATIONS = {
+    "start_stocktake", "record_scan", "finish_stocktake", "abandon_stocktake",
 }
 
 REQUEST_MUTATIONS = {
@@ -126,6 +143,17 @@ def test_system_actor_for_unattended_changes(conn):
     assert service.list_events(conn, item_id=item.id)[0].actor == "system"
 
 
+def _a_real_jpeg() -> bytes:
+    """A tiny genuine JPEG. service.add_photo decodes what it is given."""
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (24, 18), "grey").save(buffer, "JPEG")
+    return buffer.getvalue()
+
+
 def test_every_mutation_is_covered(conn, actor, item, person):
     """Call every mutating function and assert each writes an event.
 
@@ -134,6 +162,15 @@ def test_every_mutation_is_covered(conn, actor, item, person):
     """
     loan = service.checkout(conn, actor=actor, item_id=item.id, person_id=person.id, quantity=2)
     spare = service.create_item(conn, actor=actor, name="Spare", generate_barcode=False)
+    tracked = service.create_item(conn, actor=actor, name="Camera body", quantity=2,
+                                  tracked=1, generate_barcode=False)
+    unit = service.create_unit(conn, actor=actor, item_id=tracked.id, asset_tag="AT-1")
+    hold = service.open_hold(conn, actor=actor, item_id=item.id, state="broken",
+                             quantity=1, note="cracked case")
+    first_photo = service.add_photo(conn, actor=actor, item_id=item.id,
+                                    data=_a_real_jpeg())
+    second_photo = service.add_photo(conn, actor=actor, item_id=item.id,
+                                     data=_a_real_jpeg())
 
     calls = {
         "create_item": lambda: service.create_item(conn, actor=actor, name="Fresh"),
@@ -151,6 +188,36 @@ def test_every_mutation_is_covered(conn, actor, item, person):
         "return_loan": lambda: service.return_loan(conn, actor=actor, loan_id=loan.id),
         "archive_item": lambda: service.archive_item(conn, actor=actor, item_id=spare.id),
         "restore_item": lambda: service.restore_item(conn, actor=actor, item_id=spare.id),
+        "create_unit": lambda: service.create_unit(conn, actor=actor,
+                                                   item_id=tracked.id, asset_tag="AT-2"),
+        "update_unit": lambda: service.update_unit(conn, actor=actor, unit_id=unit.id,
+                                                   serial="SN-99"),
+        "retire_unit": lambda: service.retire_unit(conn, actor=actor, unit_id=unit.id),
+        "open_hold": lambda: service.open_hold(conn, actor=actor, item_id=item.id,
+                                               state="missing", quantity=1),
+        "change_hold": lambda: service.change_hold(conn, actor=actor, hold_id=hold.id,
+                                                   state="repair"),
+        "close_hold": lambda: service.close_hold(conn, actor=actor, hold_id=hold.id,
+                                                 resolution="fixed"),
+        "checkout_many": lambda: service.checkout_many(
+            conn, actor=actor, person_id=person.id,
+            lines=[(item.id, 1), (tracked.id, 1)]),
+        "add_photo": lambda: service.add_photo(
+            conn, actor=actor, item_id=item.id, data=_a_real_jpeg()),
+        "set_primary_photo": lambda: service.set_primary_photo(
+            conn, actor=actor, photo_id=second_photo.id),
+        "remove_photo": lambda: service.remove_photo(
+            conn, actor=actor, photo_id=first_photo.id),
+        "merge_people": lambda: service.merge_people(
+            conn, actor=actor,
+            keep_id=person.id,
+            merge_id=service.create_person(
+                conn, actor=actor, name="Alice Nguyen",
+                email="an1234@rit.edu").id),
+        "return_many": lambda: service.return_many(
+            conn, actor=actor,
+            loan_ids=[l.id for l in service.list_loans(
+                conn, person_id=person.id, open_only=True)][:1]),
     }
     assert set(calls) == MUTATIONS, "MUTATIONS and the call table disagree"
 
@@ -269,6 +336,8 @@ def test_no_mutating_function_is_missing_from_the_table():
         service.__name__: MUTATIONS,
         accounts.__name__: ACCOUNT_MUTATIONS,
         requests_service.__name__: REQUEST_MUTATIONS,
+        kits.__name__: KIT_MUTATIONS,
+        stocktake.__name__: STOCKTAKE_MUTATIONS,
     }
     problems = []
     for module in AUDITED_MODULES:
@@ -292,3 +361,175 @@ def test_no_mutating_function_is_missing_from_the_table():
         + "; ".join(problems)
         + ". Add each to the matching set and call table in this file."
     )
+
+
+# ---------------------------------------------------------------------------
+# the hash chain
+#
+# The audit log is the point of the system, and it is a plain SQLite table
+# that anyone with shell access can edit. The chain does not stop that -- it
+# makes it detectable. These tests are what prove the detection works.
+# ---------------------------------------------------------------------------
+
+
+def test_ordinary_use_produces_a_chain_that_verifies(conn, actor, item, person):
+    service.checkout(conn, actor=actor, item_id=item.id, person_id=person.id,
+                     quantity=2)
+    service.update_item(conn, actor=actor, item_id=item.id, shelf="Shelf 9")
+
+    result = service.verify_audit_chain(conn)
+    assert result.ok, result
+    assert result.checked == service.count_events(conn)
+    assert result.head == service.audit_head(conn)
+
+
+def test_an_empty_log_verifies(conn):
+    result = service.verify_audit_chain(conn)
+    assert result.ok
+    assert result.checked == 0
+    assert result.head == ""
+
+
+def test_the_head_moves_with_every_change(conn, actor, item):
+    first = service.audit_head(conn)
+    service.update_item(conn, actor=actor, item_id=item.id, description="edited")
+    assert service.audit_head(conn) != first
+
+
+def test_editing_an_event_is_detected_and_the_row_is_named(conn, actor, item, person):
+    service.checkout(conn, actor=actor, item_id=item.id, person_id=person.id)
+    target = conn.execute(
+        "SELECT id FROM event WHERE action = 'loan.checkout'"
+    ).fetchone()["id"]
+
+    # The realistic tamper: quietly change what the record says happened.
+    conn.execute(
+        "UPDATE event SET summary = 'nothing to see here' WHERE id = ?", (target,)
+    )
+    conn.commit()
+
+    result = service.verify_audit_chain(conn)
+    assert not result.ok
+    assert result.broken_at == target
+    assert "edited" in result.detail
+
+
+def test_deleting_an_event_is_detected(conn, actor, item):
+    service.update_item(conn, actor=actor, item_id=item.id, shelf="Shelf 4")
+    service.update_item(conn, actor=actor, item_id=item.id, shelf="Shelf 5")
+    victim = conn.execute("SELECT id FROM event ORDER BY id").fetchall()[1]["id"]
+
+    conn.execute("DELETE FROM event WHERE id = ?", (victim,))
+    conn.commit()
+
+    result = service.verify_audit_chain(conn)
+    assert not result.ok
+    assert "removed" in result.detail or "inserted" in result.detail
+
+
+def test_a_forged_event_appended_to_the_log_is_detected(conn, actor, item):
+    """A row inserted directly, with no idea what the chain state was."""
+    service.update_item(conn, actor=actor, item_id=item.id, shelf="Shelf 4")
+    conn.execute(
+        "INSERT INTO event (at, actor, action, entity_type, entity_id, item_id,"
+        " summary, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("2026-08-31T00:00:00Z", "someone", "loan.return", "loan", 99, item.id,
+         "returned, honest", "made up", "made up"),
+    )
+    conn.commit()
+
+    assert not service.verify_audit_chain(conn).ok
+
+
+def test_changing_an_actor_is_detected(conn, actor, item):
+    """Who did it is part of the digest, not just what was done."""
+    service.archive_item(conn, actor=actor, item_id=item.id)
+    conn.execute("UPDATE event SET actor = 'somebody else' WHERE id = 1")
+    conn.commit()
+
+    result = service.verify_audit_chain(conn)
+    assert not result.ok
+    assert result.broken_at == 1
+
+
+def test_reordering_events_is_detected(conn, actor, item):
+    """Swapping two rows' contents leaves both hashes wrong."""
+    service.update_item(conn, actor=actor, item_id=item.id, shelf="A")
+    service.update_item(conn, actor=actor, item_id=item.id, shelf="B")
+    rows = conn.execute(
+        "SELECT id, summary FROM event ORDER BY id DESC LIMIT 2"
+    ).fetchall()
+    conn.execute("UPDATE event SET summary = ? WHERE id = ?",
+                 (rows[1]["summary"], rows[0]["id"]))
+    conn.execute("UPDATE event SET summary = ? WHERE id = ?",
+                 (rows[0]["summary"], rows[1]["id"]))
+    conn.commit()
+
+    assert not service.verify_audit_chain(conn).ok
+
+
+def test_every_kit_mutation_is_audited(conn, actor, item):
+    """The same guarantee, in kits.py."""
+    spare = service.create_item(conn, actor=actor, name="Tripod", quantity=2)
+    kit = kits.create_kit(conn, actor=actor, name="Portrait kit 1")
+    doomed = kits.create_kit(conn, actor=actor, name="Old kit")
+    kits.archive_kit(conn, actor=actor, kit_id=doomed.id)
+
+    calls = {
+        "create_kit": lambda: kits.create_kit(conn, actor=actor, name="Video kit"),
+        "update_kit": lambda: kits.update_kit(conn, actor=actor, kit_id=kit.id,
+                                              description="for headshots"),
+        "set_kit_contents": lambda: kits.set_kit_contents(
+            conn, actor=actor, kit_id=kit.id,
+            lines=[(item.id, 2), (spare.id, 1)]),
+        "archive_kit": lambda: kits.archive_kit(conn, actor=actor, kit_id=kit.id),
+        "restore_kit": lambda: kits.restore_kit(conn, actor=actor, kit_id=doomed.id),
+    }
+    assert set(calls) == KIT_MUTATIONS, "KIT_MUTATIONS and the call table disagree"
+
+    for name, call in calls.items():
+        before = service.count_events(conn)
+        call()
+        assert service.count_events(conn) > before, f"{name} wrote no audit event"
+
+
+def test_every_stocktake_mutation_is_audited(conn, actor, item):
+    """The same guarantee in stocktake.py, with one documented exception."""
+    session = stocktake.start_stocktake(conn, actor=actor, note="monthly")
+
+    audited = {
+        "start_stocktake": lambda: stocktake.start_stocktake(
+            conn, actor=actor, scope_unit="Unit B"),
+        "finish_stocktake": lambda: stocktake.finish_stocktake(
+            conn, actor=actor, stocktake_id=session.id),
+        "abandon_stocktake": lambda: stocktake.abandon_stocktake(
+            conn, actor=actor,
+            stocktake_id=stocktake.open_stocktake(conn).id),
+    }
+    assert set(audited) | {"record_scan"} == STOCKTAKE_MUTATIONS, \
+        "STOCKTAKE_MUTATIONS and the call table disagree"
+
+    # finish first, then start another, then abandon it -- one open at a time.
+    for name in ("finish_stocktake", "start_stocktake", "abandon_stocktake"):
+        before = service.count_events(conn)
+        audited[name]()
+        assert service.count_events(conn) > before, f"{name} wrote no audit event"
+
+
+def test_a_single_scan_deliberately_writes_no_event(conn, actor, item):
+    """The documented exception, pinned so it cannot drift into an accident.
+
+    A stocktake of a thousand items would put a thousand rows in the history
+    and bury the inventory record the log exists to protect -- the same
+    reasoning as the session heartbeat. The scans are in stocktake_scan, and
+    the session is audited at both ends.
+    """
+    session = stocktake.start_stocktake(conn, actor=actor)
+    before = service.count_events(conn)
+
+    stocktake.record_scan(conn, actor=actor, stocktake_id=session.id,
+                          item_id=item.id, quantity=3)
+
+    assert service.count_events(conn) == before
+    assert stocktake.scan_counts(conn, session.id) == {item.id: 3}
+    assert service.verify_audit_chain(conn).ok

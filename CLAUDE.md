@@ -6,9 +6,10 @@ Science stockroom. Runs on a Raspberry Pi on the stockroom LAN.
 ## The rule
 
 > **Every mutation goes through a service module — `service.py` (inventory),
-> `accounts.py` (people and sessions) or `requests_service.py` (requests) —
-> which writes the change and its `event` row in the same transaction.
-> Nothing else writes to the tables.**
+> `accounts.py` (people and sessions), `requests_service.py` (requests),
+> `kits.py` (bundles) or `stocktake.py` (physical counts) — which writes the
+> change and its `event` row in the same transaction. Nothing else writes to
+> the tables.**
 
 This is the point of the system — the stockroom needs to know who had what and
 when, and that guarantee is worth more than any feature. If you add a mutating
@@ -19,13 +20,29 @@ function:
 3. Call `log_event()` inside that transaction.
 4. Add it to `MUTATIONS` and the call table in `tests/test_audit.py`.
 
-`test_no_mutating_function_is_missing_from_the_table` scans all three service
+`test_no_mutating_function_is_missing_from_the_table` scans all five service
 modules and fails if a function takes `actor: Actor` and is not audit-tested.
 That is intentional — do not weaken it to make it pass; add the test.
 
-The one documented exception is the session heartbeat (`last_seen_at` and the
-sliding idle expiry): a page view is not a domain change, and logging it would
-bury the inventory history.
+There are two documented exceptions:
+
+- the **session heartbeat** (`last_seen_at` and the sliding idle expiry): a
+  page view is not a domain change, and logging it would bury the inventory
+  history;
+- **`stocktake.record_scan`**: a count of a thousand items would write a
+  thousand rows into the log for the same reason. The scans live in
+  `stocktake_scan`, and the session is audited at start and finish.
+
+## Availability
+
+> **`available = quantity − units on loan − units held out of service`**, and
+> it lives in the `item_status` view. Nothing stores an availability number.
+
+`quantity` is what the stockroom bought and never moves on its own. A broken,
+missing or written-off unit is an open row in `item_hold`, so the shelf can
+say "we own ten, two are unaccounted for" rather than quietly becoming eight.
+Every availability figure in the app, the CLI, the kits, the stocktake and the
+public page comes through that one view.
 
 ## Security invariants
 
@@ -91,18 +108,21 @@ Other things that are load-bearing:
 ```
 src/stockroom/
   config.py  db.py  schema.sql  schema_fts.sql  models.py
-  service.py          <- all mutations + the audit log
-  search.py  barcodes.py  csvio.py
+  service.py          <- inventory mutations + the audit log
+  search.py  barcodes.py  csvio.py  photos.py
   publish/  render.py  publishers.py  worker.py
   web/      app.py  deps.py  routes_*.py
   templates/  static/  cli.py
 tests/    deploy/    docs/
 ```
 
+The phase 2 and phase 3 additions are listed below; the short version is that
+`service.py` is no longer the only place mutations live.
+
 ## Testing
 
 ```bash
-.venv/bin/pytest              # 259 tests, ~90s
+.venv/bin/pytest              # 601 tests, ~2min
 ```
 
 `tests/test_web.py` drives real HTTP requests through the actual routes and
@@ -120,10 +140,48 @@ deploy/harden-pi.sh  nginx-stockroom.conf
 docs/security.md  accounts-and-requests.md
 ```
 
+## Layout additions (phase 3)
+
+```
+kits.py                <- named bundles, expanded into a basket at the counter
+stocktake.py           <- physical counts and reconciliation
+reports.py             <- usage reads + server-rendered SVG charts
+diagnostics.py         <- the checks behind `stockroom doctor` and /diagnostics
+backup_targets.py      <- getting a snapshot off the SD card (USB, rclone)
+photos.py              <- decode, downscale, strip EXIF, store
+web/routes_counter.py  routes_kits.py  routes_stocktake.py  routes_admin.py
+tests/fixtures/schema_v2.sql   <- what an upgrading Pi actually has
+```
+
+### Things phase 3 added that are easy to get wrong
+
+- **`db._ADDED_COLUMNS` and `schema.sql` must agree.** A new column has to be
+  written twice — in `schema.sql` for fresh databases and in `_ADDED_COLUMNS`
+  for existing ones. `test_a_migrated_database_matches_a_fresh_one` compares
+  them; without it, a Pi upgrading in place quietly lacks the column.
+- **The audit log is a hash chain.** `log_event` inserts then hashes in the
+  same transaction, which is race-free only because `BEGIN IMMEDIATE` already
+  serialises writers. `rebuild_audit_chain` is called by the migration and
+  nothing else: running it later would launder a tamper into a valid chain.
+- **The counter basket is hidden form fields**, not a table and not a session.
+  Accumulating a line writes nothing; only `checkout_many` does, and it is one
+  transaction so a basket cannot half-happen.
+- **`list_storage_units` vs `list_units`.** "Unit" means two things here: a
+  storage cabinet (`item.unit`) and one physical object (the `unit` table).
+  Two functions called `list_units` once shadowed each other silently — see
+  `tests/test_source_hygiene.py`.
+- **Multipart CSRF is bounded.** `_submitted_csrf` scans only the first 16 KB
+  of a multipart body, so `_csrf` must be the **first field** in any form that
+  can carry a file. `test_the_csrf_field_comes_first` enforces it.
+- **`request.form()` returns Starlette's `UploadFile`, not FastAPI's.** An
+  `isinstance` check against `fastapi.UploadFile` fails for every real upload
+  and reports "no photo was chosen" for a photo that is right there.
+
 ## Not goals (for now)
 
 No internet exposure, no email (so no self-service password reset and no
-notifications), no full-disk encryption. The next major piece of work is RIT
+notifications), no full-disk encryption. Item photos are internal — the public
+page is a single self-contained file with no asset directory. The next major piece of work is RIT
 Shibboleth SSO, which deletes the password machinery entirely; identity is
 isolated in `web/deps.py::current_account()`. Read
 `docs/sso-integration.md` — especially the note about headers — before

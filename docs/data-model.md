@@ -94,6 +94,29 @@ Actions: `item.create`, `item.update`, `item.relocate`, `item.quantity_adjust`,
 `update_item` picks the most specific action that fits, so a pure location
 change reads as `item.relocate` and the history can be filtered meaningfully.
 
+### Phase 3: units, condition, kits, counts and photos
+
+| Table | What one row is |
+|---|---|
+| `unit` | One individual physical thing, for items with `tracked = 1`. Has its own `asset_tag` — scanning the item says *what*, scanning the tag says *which one* |
+| `item_hold` | N units that are not lendable, and why: `broken`, `repair`, `missing` or `gone`. `loan_id` links it to the loan it came back on |
+| `kit` / `kit_item` | A named bundle. Expanded into basket lines at the counter and then forgotten — nothing is ever lent "as a kit" |
+| `stocktake` / `stocktake_scan` | One physical count, and one row per thing seen on the shelf |
+| `item_photo` | The index of a photo; the file itself lives under `PHOTO_DIR`, because a stockroom's worth of images would multiply the size of every nightly snapshot |
+
+Two things about `item_hold` are deliberate:
+
+- **A hold never changes `item.quantity`.** A written-off unit is a permanent
+  hold, not a quantity edit, so the shelf can still report "we bought ten, two
+  are unaccounted for" — which is the number that gets a replacement funded.
+- **One open hold per unit**, enforced by a partial unique index. Without it
+  the same camera could be simultaneously broken and missing, and would be
+  subtracted from availability twice.
+
+The `event` table also gained `prev_hash` and `hash` in this phase: the audit
+log is now a chain, so an edited or deleted row is detectable rather than
+silent. See `service.log_event` and `service.verify_audit_chain`.
+
 ## Views
 
 ### `item_status` — item plus derived availability

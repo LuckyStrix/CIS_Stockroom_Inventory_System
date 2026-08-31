@@ -36,10 +36,16 @@ class Person(_Row):
     notes: str
     created_at: str
     updated_at: str
+    merged_into_id: int | None = None
 
     @property
     def label(self) -> str:
         return f"{self.name} <{self.email}>"
+
+    @property
+    def is_merged(self) -> bool:
+        """This record was folded into another; reads should follow the link."""
+        return self.merged_into_id is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,13 +70,21 @@ class Item(_Row):
     created_at: str
     updated_at: str
     archived_at: str | None
+    tracked: int = 0
     out_qty: int = 0
+    held_qty: int = 0
+    unaccounted_qty: int = 0
     available: int = 0
     open_loan_count: int = 0
 
     @property
     def is_archived(self) -> bool:
         return self.archived_at is not None
+
+    @property
+    def is_tracked(self) -> bool:
+        """Whether individual units of this item are tracked in ``unit``."""
+        return bool(self.tracked)
 
     @property
     def location(self) -> str:
@@ -97,10 +111,146 @@ class Item(_Row):
         if self.quantity == 0:
             return "None owned"
         if self.available <= 0:
+            # Nothing lendable. Say *why*, because "all out" sends someone to
+            # ask when it is due back and "all unavailable" does not.
+            if self.out_qty > 0 and self.held_qty > 0:
+                return "Out or unavailable"
+            if self.held_qty > 0:
+                return "Unavailable"
             return "All out"
+        if self.held_qty > 0 and self.out_qty > 0:
+            return "Partially out"
+        if self.held_qty > 0:
+            return "Some unavailable"
         if self.out_qty > 0:
             return "Partially out"
         return "Available"
+
+
+# The condition an out-of-service unit is in. Ordered as the workflow runs:
+# something breaks, someone sends it for repair, and it either comes back or
+# it does not.
+HOLD_STATES = ("broken", "repair", "missing", "gone")
+
+HOLD_STATE_LABELS = {
+    "broken": "Broken",
+    "repair": "In repair",
+    "missing": "Missing",
+    "gone": "Written off",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Unit(_Row):
+    """One individual physical thing, from the ``unit_status`` view.
+
+    ``state`` is derived from the unit's open hold, so it is 'ok' unless
+    something is wrong; it is never stored on the unit itself, for the same
+    reason availability is not stored on the item.
+    """
+
+    id: int
+    item_id: int
+    asset_tag: str | None
+    serial: str | None
+    note: str
+    created_at: str
+    updated_at: str
+    retired_at: str | None
+    item_name: str = ""
+    item_barcode: str | None = None
+    state: str = "ok"
+    state_note: str | None = None
+    hold_id: int | None = None
+
+    @property
+    def is_retired(self) -> bool:
+        return self.retired_at is not None
+
+    @property
+    def is_available(self) -> bool:
+        return self.state == "ok" and not self.is_retired
+
+    @property
+    def state_label(self) -> str:
+        if self.is_retired:
+            return "Retired"
+        return HOLD_STATE_LABELS.get(self.state, "Available")
+
+    @property
+    def label(self) -> str:
+        """How to name this unit to a human, best identifier first."""
+        return self.asset_tag or self.serial or f"unit #{self.id}"
+
+
+@dataclass(frozen=True, slots=True)
+class Hold(_Row):
+    """Units of an item that are not lendable, from the ``hold_detail`` view."""
+
+    id: int
+    item_id: int
+    unit_id: int | None
+    quantity: int
+    state: str
+    note: str
+    loan_id: int | None
+    opened_at: str
+    opened_by: str
+    closed_at: str | None
+    closed_by: str | None
+    resolution: str | None
+    item_name: str = ""
+    item_barcode: str | None = None
+    asset_tag: str | None = None
+    serial: str | None = None
+    borrower_name: str | None = None
+    borrower_email: str | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.closed_at is None
+
+    @property
+    def state_label(self) -> str:
+        return HOLD_STATE_LABELS.get(self.state, self.state)
+
+    @property
+    def is_unaccounted(self) -> bool:
+        """Nobody knows where these units are, as opposed to knowing they are broken."""
+        return self.state in ("missing", "gone")
+
+    @property
+    def what(self) -> str:
+        """What this hold covers: a named unit, or a count."""
+        if self.asset_tag or self.serial:
+            return self.asset_tag or self.serial or ""
+        return f"{self.quantity} x {self.item_name}"
+
+
+@dataclass(frozen=True, slots=True)
+class Photo(_Row):
+    """One stored picture of an item. The file itself lives under PHOTO_DIR."""
+
+    id: int
+    item_id: int
+    filename: str
+    caption: str
+    is_primary: int
+    width: int | None
+    height: int | None
+    bytes: int | None
+    created_at: str
+    created_by: str
+    deleted_at: str | None
+
+    @property
+    def url(self) -> str:
+        return f"/photos/{self.filename}"
+
+    @property
+    def alt(self) -> str:
+        """Alt text. Falls back to something honest rather than an empty string."""
+        return self.caption or "Photo of this item"
 
 
 @dataclass(frozen=True, slots=True)

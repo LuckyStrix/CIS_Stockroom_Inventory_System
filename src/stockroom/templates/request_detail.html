@@ -127,4 +127,45 @@
 </div>
 
 <p class="mt"><a href="{{ '/requests' if account.is_staff else '/requests/mine' }}">← Back to requests</a></p>
+{% if overlaps %}
+<div class="card attention">
+  <h2>Other requests want this too</h2>
+  <p class="lede">
+    {{ overlaps|length }} other live request{{ 's' if overlaps|length != 1 else '' }}
+    for {{ subject.item_name }} overlap{{ '' if overlaps|length != 1 else 's' }}
+    this window. Between them they ask for {{ competing_demand }} unit(s), and
+    {% if item %}{{ item.available }} {{ 'is' if item.available == 1 else 'are' }}
+    on the shelf{% else %}the shelf may not have that many{% endif %}.
+  </p>
+  <table class="plain">
+    <tbody>
+      {% for other in overlaps %}
+      <tr>
+        <td>
+          <a href="/requests/{{ other.id }}">#{{ other.id }}</a>
+          — {{ other.quantity }} × {{ other.item_name }}
+          <div class="muted small">
+            {{ other.requester_name }} ·
+            {% if other.needed_from or other.needed_until %}
+              {{ other.needed_from|date }} to {{ other.needed_until|date }}
+            {% else %}
+              no dates given
+            {% endif %}
+          </div>
+        </td>
+        <td class="nowrap">
+          <span class="pill {{ other.status|status_class }}">{{ other.status }}</span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="flush muted small">
+    This is a heads-up, not a booking. Approving a request still reserves
+    nothing — equipment moves when someone hands it over, and the availability
+    figure only ever counts what has actually left the room.
+  </p>
+</div>
+{% endif %}
+
 {% endblock %}

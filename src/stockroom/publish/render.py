@@ -23,7 +23,7 @@ from markupsafe import Markup
 from .. import config, db
 from ..models import Item
 from ..requests_service import list_open_hours
-from ..service import list_items, list_loans, summary
+from ..service import audit_head, list_items, list_loans, summary
 
 _TEMPLATE_DIR = __import__("pathlib").Path(__file__).resolve().parent.parent / "templates"
 
@@ -62,6 +62,13 @@ def build_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "generated_at": db.utcnow(),
         "summary": summary(conn),
         "items": [_item_payload(i) for i in items],
+        # The head of the audit chain. Published here on purpose: the chain
+        # detects an edited history, but anyone who can edit the database can
+        # also recompute it. Copies of the head sitting outside the Pi -- in
+        # this file, in /health, in every nightly backup -- are what make a
+        # convincing rewrite expensive rather than trivial. It identifies
+        # nothing and reveals nothing; it is a hash of hashes.
+        "audit_head": audit_head(conn),
     }
 
     # Confirmed staffed windows. This is the payoff of the open-hours request

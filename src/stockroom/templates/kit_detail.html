@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}{{ kit.name }}{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>
+      {{ kit.name }}
+      {% if kit.is_archived %}<span class="pill grey">Archived</span>
+      {% elif kit.is_complete %}<span class="pill ok">Complete</span>
+      {% elif kit.lines %}<span class="pill out">{{ kit.missing|length }} short</span>{% endif %}
+    </h1>
+    <p class="lede">{{ kit.description or "No description." }}</p>
+  </div>
+  <div class="actions">
+    <a class="btn secondary" href="/kits">← All kits</a>
+    {% if not kit.is_archived and kit.lines %}
+      <a class="btn" href="/counter">Use at the counter</a>
+    {% endif %}
+  </div>
+</div>
+
+<h2>Contents</h2>
+<form method="post" action="/kits/{{ kit.id }}/contents">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <div class="tablewrap">
+  {% if kit.lines %}
+  <table>
+    <thead><tr><th>Item</th><th>Location</th><th class="num">In the kit</th><th>On the shelf</th></tr></thead>
+    <tbody>
+      {% for line in kit.lines %}
+      <tr>
+        <td>
+          <a href="/items/{{ line.item_id }}">{{ line.item_name }}</a>
+          <input type="hidden" name="item_id" value="{{ line.item_id }}">
+        </td>
+        <td class="nowrap muted">{{ line.item_unit }} / {{ line.item_shelf }}</td>
+        <td class="num">
+          <input name="quantity" type="number" value="{{ line.quantity }}" min="0"
+                 class="qty" aria-label="How many {{ line.item_name }}">
+        </td>
+        <td class="nowrap">
+          {% if line.is_satisfiable %}
+            <span class="muted">{{ line.item_available }} available</span>
+          {% else %}
+            <span class="pill out">{{ line.shortfall }} short</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Nothing in this kit yet.</div>
+  {% endif %}
+  </div>
+
+  <div class="card mt">
+    <div class="row">
+      <div class="field">
+        <label for="add_item">Add an item</label>
+        <select id="add_item" name="add_item">
+          <option value="">Choose an item…</option>
+          {% for item in items %}
+          <option value="{{ item.id }}">{{ item.name }} — {{ item.location }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="add_quantity">How many</label>
+        <input id="add_quantity" name="add_quantity" type="number" value="1" min="1">
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn">Save contents</button>
+      <span class="hint">Set a quantity to 0 to take a line out.</span>
+    </div>
+  </div>
+</form>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Rename</h2>
+    <form method="post" action="/kits/{{ kit.id }}/edit">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="name">Name</label>
+        <input id="name" name="name" value="{{ kit.name }}" required>
+      </div>
+      <div class="field">
+        <label for="description">Description</label>
+        <input id="description" name="description" value="{{ kit.description }}">
+      </div>
+      <button class="btn secondary">Save</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Retire</h2>
+    {% if kit.is_archived %}
+      <p class="muted">This kit is archived and does not appear at the counter.</p>
+      <form method="post" action="/kits/{{ kit.id }}/restore">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn secondary">Restore</button>
+      </form>
+    {% else %}
+      <p class="muted">
+        Archiving hides the kit from the counter. Loans made from it are
+        untouched — they were only ever loans of items.
+      </p>
+      <form method="post" action="/kits/{{ kit.id }}/archive"
+            data-confirm="Archive {{ kit.name }}?">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn secondary">Archive</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}

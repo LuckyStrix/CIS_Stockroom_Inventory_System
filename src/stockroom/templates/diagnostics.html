@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Diagnostics{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>Diagnostics</h1>
+    <p class="lede">
+      {% if report.ok %}
+        Everything that can be checked automatically is working.
+      {% else %}
+        {{ report.failures|length }} of {{ report.checks|length }} checks
+        need attention.
+      {% endif %}
+    </p>
+  </div>
+  <div class="actions">
+    {% if not checked_remote %}
+      <a class="btn secondary" href="/diagnostics?check_remote=true">Check the backup remote</a>
+    {% else %}
+      <a class="btn secondary" href="/diagnostics">Skip the remote check</a>
+    {% endif %}
+  </div>
+</div>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for check in report.checks %}
+    <tr>
+      <td><strong>{{ check.name }}</strong></td>
+      <td class="nowrap">
+        {% if check.status == 'ok' %}<span class="pill ok">Passed</span>
+        {% elif check.status == 'warn' %}<span class="pill warn">Attention</span>
+        {% else %}<span class="pill out">Failed</span>{% endif %}
+      </td>
+      <td>{{ check.detail }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div class="card mt">
+  <h2>What to do about it</h2>
+  <p class="lede">
+    These run as <span class="mono">stockroom doctor</span> on the Pi as well,
+    which is what the nightly timer uses — a failure there shows up in
+    <span class="mono">systemctl status stockroom-backup</span>.
+  </p>
+  <p class="flush muted small">
+    A <strong>failed</strong> check is wrong now. An <strong>attention</strong>
+    check is a gap worth closing rather than a broken machine — most often it
+    means no off-box backup is configured, so every copy of the database is on
+    the same SD card as the database.
+  </p>
+</div>
+
+{% endblock %}

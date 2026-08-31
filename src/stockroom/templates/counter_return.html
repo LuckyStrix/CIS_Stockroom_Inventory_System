@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Returns{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>Returns</h1>
+    <p class="lede">Everything one person has, handed back in one go.</p>
+  </div>
+  <div class="actions">
+    <a class="btn secondary" href="/counter">← Counter</a>
+  </div>
+</div>
+
+<div class="filters">
+  <form method="get" action="/counter/return">
+    <select name="person_id" aria-label="Borrower">
+      <option value="">Who is returning something?</option>
+      {% for p in people %}
+      <option value="{{ p.id }}" {% if person and p.id == person.id %}selected{% endif %}>
+        {{ p.name }} — {{ p.email }}
+      </option>
+      {% endfor %}
+    </select>
+    <button class="btn secondary">Show</button>
+  </form>
+</div>
+
+{% if person %}
+<h2>{{ person.name }} has {{ loans|length }} item(s) out</h2>
+<div class="tablewrap">
+{% if loans %}
+<form method="post" action="/counter/return">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="person_id" value="{{ person.id }}">
+  <table>
+    <thead><tr><th>Back?</th><th>Item</th><th class="num">Qty</th><th>Out since</th><th>Due</th></tr></thead>
+    <tbody>
+      {% for loan in loans %}
+      <tr>
+        <td>
+          <input type="checkbox" name="loan_id" value="{{ loan.id }}" checked
+                 aria-label="Return {{ loan.item_name }}">
+        </td>
+        <td>
+          <a href="/items/{{ loan.item_id }}">{{ loan.item_name }}</a>
+          <div class="muted small">{{ loan.item_unit }} / {{ loan.item_shelf }}</div>
+        </td>
+        <td class="num">{{ loan.quantity }}</td>
+        <td class="nowrap muted">{{ loan.checked_out_at|datetime }}</td>
+        <td class="nowrap">
+          {% if loan.due_at %}
+            {% if loan.is_overdue(now) %}<span class="pill out">Overdue {{ loan.due_at|date }}</span>
+            {% else %}<span class="muted">{{ loan.due_at|date }}</span>{% endif %}
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="card">
+    <div class="field">
+      <label for="note">Note <span class="hint">(optional)</span></label>
+      <input id="note" name="note" placeholder="e.g. all present and correct">
+    </div>
+    <div class="actions">
+      <button class="btn">Return the ticked items</button>
+      <span class="hint">
+        Anything that came back damaged is better returned one at a time from
+        the item page, so the fault is recorded against the right loan.
+      </span>
+    </div>
+  </div>
+</form>
+{% else %}
+<div class="empty">{{ person.name }} has nothing out.</div>
+{% endif %}
+</div>
+{% endif %}
+
+{% endblock %}

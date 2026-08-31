@@ -184,7 +184,8 @@ def test_csrf_middleware_does_not_eat_the_request_body(requester_client, conn):
 
 @pytest.mark.parametrize(
     "path", ["/accounts", "/history", "/people", "/loans", "/requests",
-             "/labels", "/export.csv"],
+             "/labels", "/export.csv", "/diagnostics", "/counter",
+             "/counter/return", "/kits", "/stocktake", "/reports"],
 )
 def test_a_requester_cannot_reach_staff_pages(requester_client, path):
     assert requester_client.get(path, follow_redirects=False).status_code == 403
@@ -192,7 +193,8 @@ def test_a_requester_cannot_reach_staff_pages(requester_client, path):
 
 @pytest.mark.parametrize(
     "path", ["/accounts", "/history", "/people", "/loans", "/requests",
-             "/labels", "/export.csv"],
+             "/labels", "/export.csv", "/diagnostics", "/counter",
+             "/counter/return", "/kits", "/stocktake", "/reports"],
 )
 def test_staff_can_reach_staff_pages(staff_client, path):
     assert staff_client.get(path, follow_redirects=False).status_code == 200

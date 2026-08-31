@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Stocktake report{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>{{ result.stocktake.scope_label|capitalize }}</h1>
+    <p class="lede">
+      Counted {{ result.stocktake.started_at|datetime }} by
+      {{ result.stocktake.started_by }}.
+      {{ result.counted_items }} item(s) seen,
+      {{ result.problems|length }} discrepancy(ies).
+    </p>
+  </div>
+  <div class="actions">
+    <a class="btn secondary" href="/stocktake">← Stocktake</a>
+  </div>
+</div>
+
+{% if result.is_clean %}
+<div class="flash ok">
+  The shelves match the database exactly. Nothing to reconcile.
+</div>
+{% else %}
+
+<h2>Discrepancies</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Item</th><th>Location</th><th class="num">Expected</th><th class="num">Counted</th><th>Difference</th><th></th></tr></thead>
+  <tbody>
+    {% for d in result.problems %}
+    <tr>
+      <td><a href="/items/{{ d.item_id }}">{{ d.item_name }}</a>
+        {% if d.barcode %}<div class="mono muted small">{{ d.barcode }}</div>{% endif %}</td>
+      <td class="nowrap muted">{{ d.location }}</td>
+      <td class="num">{{ d.expected }}</td>
+      <td class="num">{{ d.counted }}</td>
+      <td class="nowrap">
+        {% if d.is_short %}<span class="pill out">{{ d.label }}</span>
+        {% else %}<span class="pill warn">{{ d.label }}</span>{% endif %}
+      </td>
+      <td class="nowrap">
+        {% if d.is_short %}
+        <form method="post" action="/stocktake/{{ result.stocktake.id }}/mark-missing"
+              data-confirm="Record {{ d.expected - d.counted }} × {{ d.item_name }} as missing? This takes them off the shelf count.">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="item_id" value="{{ d.item_id }}">
+          <input type="hidden" name="quantity" value="{{ d.expected - d.counted }}">
+          <button class="btn small secondary">Record as missing</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div class="card mt">
+  <h2>Before you write anything off</h2>
+  <p class="flush muted">
+    The most common cause of a missing scan is a missed scan — a shelf nobody
+    walked, or a box behind another box. Nothing here is applied
+    automatically; recording something as missing is a deliberate act, and it
+    shows up on the item as an open hold you can close again the moment it
+    turns up.
+  </p>
+</div>
+{% endif %}
+
+<h2>Matched</h2>
+<div class="tablewrap">
+{% if result.matched %}
+<table>
+  <thead><tr><th>Item</th><th>Location</th><th class="num">On the shelf</th></tr></thead>
+  <tbody>
+    {% for d in result.matched %}
+    <tr>
+      <td><a href="/items/{{ d.item_id }}">{{ d.item_name }}</a></td>
+      <td class="nowrap muted">{{ d.location }}</td>
+      <td class="num">{{ d.counted }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Nothing matched.</div>
+{% endif %}
+</div>
+
+{% endblock %}

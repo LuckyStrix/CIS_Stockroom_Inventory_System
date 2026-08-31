@@ -34,4 +34,46 @@
 </table>
 {% else %}<div class="empty">Nobody on record yet.</div>{% endif %}
 </div>
+{% if duplicates %}
+<div class="card attention">
+  <h2>Possible duplicates</h2>
+  <p class="lede">
+    These pairs share a name. Two records for one person split their history
+    in half and send the overdue chase to whichever address was used last.
+  </p>
+  <table class="plain">
+    <tbody>
+      {% for a, b in duplicates %}
+      <tr>
+        <td>
+          <a href="/people/{{ a.id }}">{{ a.name }}</a>
+          <span class="mono muted small">{{ a.email }}</span>
+          <span class="muted">and</span>
+          <a href="/people/{{ b.id }}">{{ b.name }}</a>
+          <span class="mono muted small">{{ b.email }}</span>
+        </td>
+        <td class="nowrap">
+          <form method="post" action="/people/merge" class="actions"
+                data-confirm="Merge these two records? Nothing is deleted — loans move to the record you keep.">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <select name="keep_id" aria-label="Which record to keep">
+              <option value="{{ a.id }}">keep {{ a.email }}</option>
+              <option value="{{ b.id }}">keep {{ b.email }}</option>
+            </select>
+            <input type="hidden" name="merge_id" value="{{ b.id }}">
+            <button class="btn small secondary">Merge</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="flush muted small">
+    Merging moves loans and the login account onto the record you keep, and
+    leaves the other in place pointing at it. Nothing is deleted, and old
+    links still resolve.
+  </p>
+</div>
+{% endif %}
+
 {% endblock %}

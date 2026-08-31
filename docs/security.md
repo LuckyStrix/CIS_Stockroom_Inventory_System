@@ -147,8 +147,21 @@ These are real, and none of them is fixed by more code:
 2. **A self-signed certificate trains people to click through warnings.**
 3. **No email verification.** Staff approval is the *only* check that an
    address belongs to the person claiming it. Approve people you recognise.
-4. **The SD card will fail.** Backups run nightly, but they live on the same
-   card. Copy them off the machine — `docs/operations.md` says how.
+4. **The SD card will fail.** Backups run nightly and are now verified before
+   they count, but by default they still live on the same card. Set
+   `STOCKROOM_BACKUP_COPY_DIR` (a USB stick) or `STOCKROOM_BACKUP_REMOTE` (an
+   rclone remote) so a copy actually leaves the machine; `stockroom doctor`
+   warns while neither is configured.
+5. **An uploaded backup is a readable copy of everything.** A snapshot sent to
+   Google Drive contains every email address and the whole audit log, in the
+   clear. Keep that folder private to the account that owns it and do not
+   share the link. (rclone can wrap the remote in a `crypt` layer if that
+   trade-off ever stops being acceptable.)
+6. **The audit chain detects tampering; it does not prevent it.** Anyone who
+   can write to the database file can also recompute the chain. What makes
+   that expensive is that the head hash is copied outside the Pi — into
+   `inventory.json`, into `/health`, and into every nightly snapshot — so a
+   convincing rewrite means finding and rewriting all of those too.
 5. **Someone has to own this.** Unapplied patches eight months from now, a
    reboot nobody performed, the person who set it up graduating: these are the
    realistic ways this system dies. Put a name and a monthly check in the

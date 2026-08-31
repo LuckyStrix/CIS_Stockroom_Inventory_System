@@ -15,13 +15,18 @@
     <a href="/" {% if path == '/' %}class="active"{% endif %}>Dashboard</a>
     <a href="/items" {% if path.startswith('/items') %}class="active"{% endif %}>Items</a>
     {% if account.is_staff %}
+      <a href="/counter" {% if path.startswith('/counter') %}class="active"{% endif %}>Counter</a>
       <a href="/loans" {% if path.startswith('/loans') %}class="active"{% endif %}>Checked out</a>
       <a href="/requests" {% if path == '/requests' %}class="active"{% endif %}>
         Requests{% if pending_requests %} <span class="badge">{{ pending_requests }}</span>{% endif %}</a>
       <a href="/accounts" {% if path.startswith('/accounts') %}class="active"{% endif %}>
         Accounts{% if pending_accounts %} <span class="badge">{{ pending_accounts }}</span>{% endif %}</a>
+      <a href="/kits" {% if path.startswith('/kits') %}class="active"{% endif %}>Kits</a>
       <a href="/people" {% if path.startswith('/people') %}class="active"{% endif %}>People</a>
+      <a href="/stocktake" {% if path.startswith('/stocktake') %}class="active"{% endif %}>Stocktake</a>
       <a href="/history" {% if path.startswith('/history') %}class="active"{% endif %}>History</a>
+      <a href="/reports" {% if path.startswith('/reports') %}class="active"{% endif %}>Reports</a>
+      <a href="/diagnostics" {% if path.startswith('/diagnostics') %}class="active"{% endif %}>Health</a>
     {% else %}
       <a href="/requests/mine" {% if path.startswith('/requests') %}class="active"{% endif %}>My requests</a>
     {% endif %}

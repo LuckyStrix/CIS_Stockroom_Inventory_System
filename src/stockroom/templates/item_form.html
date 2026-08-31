@@ -35,6 +35,19 @@
         <div class="hint">Optional. Flags the item when availability drops this low.</div>
       </div>
     </div>
+    <div class="field">
+      <label for="tracked">
+        <input id="tracked" name="tracked" type="checkbox" value="1"
+               {% if item and item.is_tracked %}checked{% endif %}>
+        Track each one individually
+      </label>
+      <div class="hint">
+        For gear where it matters <em>which</em> one — camera bodies, lenses,
+        anything with a serial number. Each unit gets its own asset tag, so a
+        fault can be recorded against the right one. Leave off for anything
+        countable: SD cards, batteries, cables.
+      </div>
+    </div>
   </div>
 
   <fieldset>
@@ -43,7 +56,7 @@
       <div class="field">
         <label for="unit">Storage unit</label>
         <input id="unit" name="unit" list="units" value="{{ item.unit if item else '' }}" placeholder="Unit B">
-        <datalist id="units">{% for u in units %}<option value="{{ u }}">{% endfor %}</datalist>
+        <datalist id="units">{% for u in storage_units %}<option value="{{ u }}">{% endfor %}</datalist>
       </div>
       <div class="field">
         <label for="shelf">Shelf</label>

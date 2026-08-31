@@ -13,6 +13,7 @@ dependencies = [
     "jinja2>=3.1",
     "python-multipart>=0.0.9",
     "python-barcode>=0.15",
+    "Pillow>=10",
 ]
 
 [project.scripts]
@@ -22,7 +23,9 @@ stockroom = "stockroom.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-stockroom = ["schema.sql", "templates/*.html", "static/*"]
+# schema_fts.sql matters as much as schema.sql: without it an installed copy
+# silently has no search index and falls back to LIKE forever.
+stockroom = ["schema.sql", "schema_fts.sql", "templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

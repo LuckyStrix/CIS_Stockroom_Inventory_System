@@ -19,6 +19,13 @@ Environment variables (all optional):
     STOCKROOM_ALLOWED_HOSTS           comma-separated Host values to accept
     STOCKROOM_SESSION_IDLE_HOURS      idle session timeout (default 8)
     STOCKROOM_SESSION_MAX_DAYS        absolute session cap (default 7)
+    STOCKROOM_BACKUP_COPY_DIR         second local copy (a mounted USB stick)
+    STOCKROOM_BACKUP_REMOTE           rclone remote, e.g. "gdrive:stockroom"
+    STOCKROOM_RCLONE                  path to the rclone binary
+    STOCKROOM_BACKUP_REMOTE_KEEP      snapshots to keep on the remote
+    STOCKROOM_PHOTO_DIR               where uploaded item photos are stored
+    STOCKROOM_PHOTO_MAX_PIXELS        longest edge after downscaling (1600)
+    STOCKROOM_MAX_UPLOAD_BYTES        reject a request body larger than this
 """
 
 from __future__ import annotations
@@ -47,6 +54,21 @@ DB_PATH: Path = _env_path("STOCKROOM_DB", DATA_DIR / "stockroom.db")
 BACKUP_DIR: Path = DATA_DIR / "backups"
 
 PUBLISH_DIR: Path = _env_path("STOCKROOM_PUBLISH_DIR", REPO_ROOT / "publish")
+
+# Uploaded item photos. Inside DATA_DIR because that is the only path the
+# systemd unit lets the service write to (ReadWritePaths=/var/lib/stockroom).
+PHOTO_DIR: Path = _env_path("STOCKROOM_PHOTO_DIR", DATA_DIR / "photos")
+
+# Uploaded photos are re-encoded down to this before being stored. A phone
+# photo is 3-5 MB; at this size they land around 200 KB, which matters on an
+# SD card that is already the most likely thing here to fail.
+PHOTO_MAX_PIXELS: int = int(os.environ.get("STOCKROOM_PHOTO_MAX_PIXELS", "1600"))
+PHOTO_QUALITY: int = int(os.environ.get("STOCKROOM_PHOTO_QUALITY", "82"))
+
+# Hard ceiling on an upload body, checked in the CSRF middleware before the
+# body is parsed. nginx caps this at 8m in production, but development runs
+# without nginx and the middleware reads the whole body into memory.
+MAX_UPLOAD_BYTES: int = int(os.environ.get("STOCKROOM_MAX_UPLOAD_BYTES", str(9 * 1024 * 1024)))
 
 ORG_NAME: str = os.environ.get(
     "STOCKROOM_ORG", "Carlson Center for Imaging Science — RIT"
@@ -86,6 +108,31 @@ PUBLISH_DEBOUNCE_SECONDS: float = float(
 
 # Number of nightly database snapshots to keep (see deploy/stockroom-backup).
 BACKUP_KEEP: int = int(os.environ.get("STOCKROOM_BACKUP_KEEP", "30"))
+
+# Where else a snapshot goes once it has been written and verified. Both are
+# opt-in: unset means the only copy lives on the Pi's SD card, which is the
+# single most likely component to fail. See docs/operations.md.
+#
+# A second local directory -- a mounted USB stick, or a share.
+_copy = os.environ.get("STOCKROOM_BACKUP_COPY_DIR")
+BACKUP_COPY_DIR: Path | None = Path(_copy).expanduser().resolve() if _copy else None
+
+# An rclone remote, e.g. "gdrive:stockroom-backups". rclone owns the
+# credentials (~stockroom/.config/rclone/rclone.conf, created once with
+# `sudo -u stockroom rclone config`); this application never sees a token.
+#
+# Note what ends up there: a snapshot is a readable copy of the whole
+# database -- every email address and the entire audit log. Keep the
+# destination folder private to the account that owns it.
+BACKUP_REMOTE: str = os.environ.get("STOCKROOM_BACKUP_REMOTE", "").strip()
+RCLONE: str = os.environ.get("STOCKROOM_RCLONE", "rclone")
+BACKUP_REMOTE_KEEP: int = int(os.environ.get("STOCKROOM_BACKUP_REMOTE_KEEP", "30"))
+
+# How long a pending request or signup may sit before it is flagged as stale.
+# There is no email server, so nothing chases anyone: a request is only worked
+# if a human sees it waiting. This is what turns "waiting" into "waiting too
+# long" in the inbox and in `stockroom doctor`.
+REQUEST_STALE_DAYS: int = int(os.environ.get("STOCKROOM_REQUEST_STALE_DAYS", "3"))
 
 # Session lifetimes. Idle expiry slides forward on each request; the absolute
 # cap never does.

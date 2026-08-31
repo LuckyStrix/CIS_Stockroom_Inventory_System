@@ -41,7 +41,11 @@ CREATE TABLE IF NOT EXISTS person (
     active     INTEGER NOT NULL DEFAULT 1,   -- 0 hides them from pickers
     notes      TEXT    NOT NULL DEFAULT '',
     created_at TEXT    NOT NULL,
-    updated_at TEXT    NOT NULL
+    updated_at TEXT    NOT NULL,
+    -- Set when this record was merged into another (service.merge_people).
+    -- The row is kept so its old loans still resolve to a name; reads follow
+    -- the pointer to the survivor. Nothing is ever deleted.
+    merged_into_id INTEGER REFERENCES person(id)
 );
 
 
@@ -66,6 +70,10 @@ CREATE TABLE IF NOT EXISTS item (
     shelf        TEXT    NOT NULL DEFAULT '',
     sub_location TEXT,                       -- optional 3rd descriptor
     min_quantity INTEGER CHECK (min_quantity IS NULL OR min_quantity >= 0),
+    -- 1 => this item's individual units are tracked in the `unit` table, so
+    -- "which camera body was it" is answerable. Off for anything countable
+    -- (SD cards, batteries), where a row per unit would be absurd.
+    tracked      INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT    NOT NULL,
     updated_at   TEXT    NOT NULL,
     archived_at  TEXT                        -- non-NULL => archived
@@ -117,6 +125,11 @@ CREATE INDEX IF NOT EXISTS idx_loan_due       ON loan (due_at) WHERE returned_at
 --   item_id / person_id -- denormalized so per-item and per-person history
 --                          are single indexed lookups rather than joins
 --                          through entity_type/entity_id.
+--
+-- The log is also a hash chain: each row's `hash` covers its own fields plus
+-- the previous row's hash, so editing or removing any historical row breaks
+-- every hash after it. See service.log_event and service.verify_audit_chain
+-- for what that does and does not buy you.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS event (
     id           INTEGER PRIMARY KEY,
@@ -128,7 +141,9 @@ CREATE TABLE IF NOT EXISTS event (
     item_id      INTEGER REFERENCES item(id),
     person_id    INTEGER REFERENCES person(id),
     summary      TEXT    NOT NULL,   -- human-readable one-liner
-    changes_json TEXT                -- JSON object or NULL
+    changes_json TEXT,               -- JSON object or NULL
+    prev_hash    TEXT,               -- hash of the preceding row ('' for the first)
+    hash         TEXT                -- this row's digest; see service.log_event
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_at     ON event (at DESC);
@@ -138,21 +153,98 @@ CREATE INDEX IF NOT EXISTS idx_event_action ON event (action);
 
 
 -- ---------------------------------------------------------------------------
+-- unit: one individual physical thing.
+--
+-- Only for items with `tracked = 1`. Ten SD cards do not want ten rows here;
+-- four camera bodies do, because "which one came back with a bent mount" is
+-- a question the stockroom actually has to answer.
+--
+-- `asset_tag` is the unit's own scannable code, separate from the item's
+-- barcode: scanning the item tells you what kind of thing it is, scanning the
+-- asset tag tells you which one.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS unit (
+    id         INTEGER PRIMARY KEY,
+    item_id    INTEGER NOT NULL REFERENCES item(id),
+    asset_tag  TEXT    UNIQUE,           -- NULL allowed; assigned on demand
+    serial     TEXT,                     -- manufacturer's serial, if known
+    note       TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    NOT NULL,
+    updated_at TEXT    NOT NULL,
+    retired_at TEXT                      -- non-NULL => no longer owned
+);
+
+CREATE INDEX IF NOT EXISTS idx_unit_item ON unit (item_id);
+
+
+-- ---------------------------------------------------------------------------
+-- item_hold: N units of an item are not lendable, and why.
+--
+-- This is how the stockroom says "that one is broken" without lying about how
+-- many it owns. `item.quantity` stays at what was bought; a hold subtracts
+-- from what can be lent. A write-off is a permanent hold in state 'gone', not
+-- a quantity edit, so the shelf can still report "we bought ten, two are
+-- unaccounted for" -- which is the number a stockroom manager actually needs.
+--
+--   broken   damaged, not lendable, no plan yet
+--   repair   sent out or awaiting repair
+--   missing  unaccounted for, may still turn up
+--   gone     written off; not coming back
+--
+-- An open hold has closed_at IS NULL. Closing one returns those units to the
+-- shelf. For a tracked item the hold names a `unit`; for a countable one it
+-- carries a quantity and unit_id is NULL.
+--
+-- `loan_id` links a hold to the loan it came back on, which is what makes
+-- "who broke it" answerable rather than merely "when did it break".
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS item_hold (
+    id         INTEGER PRIMARY KEY,
+    item_id    INTEGER NOT NULL REFERENCES item(id),
+    unit_id    INTEGER REFERENCES unit(id),   -- NULL when the item is countable
+    quantity   INTEGER NOT NULL CHECK (quantity > 0),
+    state      TEXT    NOT NULL
+               CHECK (state IN ('broken', 'repair', 'missing', 'gone')),
+    note       TEXT    NOT NULL DEFAULT '',
+    loan_id    INTEGER REFERENCES loan(id),   -- came back like this, on this loan
+    opened_at  TEXT    NOT NULL,
+    opened_by  TEXT    NOT NULL,
+    closed_at  TEXT,
+    closed_by  TEXT,
+    resolution TEXT,
+
+    -- A named unit is one physical object, so it cannot be three of anything.
+    CHECK (unit_id IS NULL OR quantity = 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hold_open ON item_hold (item_id) WHERE closed_at IS NULL;
+
+-- One open hold per unit. Without this a unit could be simultaneously broken
+-- and missing, the unit_status join below would multiply rows, and the same
+-- physical camera would be subtracted from availability twice.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hold_one_open_per_unit
+    ON item_hold (unit_id) WHERE unit_id IS NOT NULL AND closed_at IS NULL;
+
+
+-- ---------------------------------------------------------------------------
 -- item_status: item + derived availability. The single source of truth for
 -- "how many can I take right now".
 --
--- available = quantity - (sum of open loan quantities)
+--   available = quantity - (units on loan) - (units held out of service)
 --
 -- Because this is a view rather than a stored column, it is impossible for
--- availability to disagree with the loan table.
+-- availability to disagree with the loan and hold tables. Every availability
+-- figure in the application, the CLI and the public page comes from here.
 -- ---------------------------------------------------------------------------
 DROP VIEW IF EXISTS item_status;
 CREATE VIEW item_status AS
 SELECT
     i.*,
-    COALESCE(o.out_qty, 0)              AS out_qty,
-    i.quantity - COALESCE(o.out_qty, 0) AS available,
-    COALESCE(o.loan_count, 0)           AS open_loan_count
+    COALESCE(o.out_qty, 0)          AS out_qty,
+    COALESCE(h.held_qty, 0)         AS held_qty,
+    COALESCE(h.unaccounted_qty, 0)  AS unaccounted_qty,
+    i.quantity - COALESCE(o.out_qty, 0) - COALESCE(h.held_qty, 0) AS available,
+    COALESCE(o.loan_count, 0)       AS open_loan_count
 FROM item i
 LEFT JOIN (
     SELECT item_id,
@@ -161,7 +253,58 @@ LEFT JOIN (
     FROM loan
     WHERE returned_at IS NULL
     GROUP BY item_id
-) o ON o.item_id = i.id;
+) o ON o.item_id = i.id
+LEFT JOIN (
+    SELECT item_id,
+           SUM(quantity) AS held_qty,
+           -- Broken and in-repair units are accounted for: somebody knows
+           -- where they are. Missing and written-off ones are not, and that
+           -- is the number worth putting on a dashboard.
+           SUM(CASE WHEN state IN ('missing', 'gone') THEN quantity ELSE 0 END)
+               AS unaccounted_qty
+    FROM item_hold
+    WHERE closed_at IS NULL
+    GROUP BY item_id
+) h ON h.item_id = i.id;
+
+
+-- ---------------------------------------------------------------------------
+-- unit_status: each individual unit with its current condition.
+-- The LEFT JOIN is single-valued because of idx_hold_one_open_per_unit.
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS unit_status;
+CREATE VIEW unit_status AS
+SELECT
+    u.*,
+    i.name                 AS item_name,
+    i.barcode              AS item_barcode,
+    COALESCE(h.state, 'ok') AS state,
+    h.note                 AS state_note,
+    h.id                   AS hold_id
+FROM unit u
+JOIN item i ON i.id = u.item_id
+LEFT JOIN item_hold h ON h.unit_id = u.id AND h.closed_at IS NULL;
+
+
+-- ---------------------------------------------------------------------------
+-- hold_detail: holds joined to the names they reference, for the item page
+-- and the reports.
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS hold_detail;
+CREATE VIEW hold_detail AS
+SELECT
+    h.*,
+    i.name    AS item_name,
+    i.barcode AS item_barcode,
+    u.asset_tag,
+    u.serial,
+    p.name    AS borrower_name,
+    p.email   AS borrower_email
+FROM item_hold h
+JOIN item i ON i.id = h.item_id
+LEFT JOIN unit u ON u.id = h.unit_id
+LEFT JOIN loan l ON l.id = h.loan_id
+LEFT JOIN person p ON p.id = l.person_id;
 
 
 -- ---------------------------------------------------------------------------
@@ -181,6 +324,144 @@ SELECT
 FROM loan l
 JOIN item   i ON i.id = l.item_id
 JOIN person p ON p.id = l.person_id;
+
+
+-- ---------------------------------------------------------------------------
+-- kit: a named bundle of items that go out together.
+--
+-- "Portrait kit 2" is a body, a lens, two batteries and a card. Staff think
+-- in kits; the loan table thinks in items. A kit is expanded into ordinary
+-- basket lines at the counter and then forgotten -- it is a shortcut for
+-- typing, not a new kind of loan. Nothing is ever lent "as a kit", so there
+-- is no kit state to get out of step with the loans it produced.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS kit (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    description TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL,
+    archived_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kit_item (
+    kit_id   INTEGER NOT NULL REFERENCES kit(id),
+    item_id  INTEGER NOT NULL REFERENCES item(id),
+    quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    PRIMARY KEY (kit_id, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kit_item_item ON kit_item (item_id);
+
+
+-- ---------------------------------------------------------------------------
+-- kit_contents: a kit's lines with the item detail needed to show whether
+-- the whole kit can actually go out right now.
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS kit_contents;
+CREATE VIEW kit_contents AS
+SELECT
+    k.kit_id,
+    k.item_id,
+    k.quantity,
+    s.name        AS item_name,
+    s.barcode     AS item_barcode,
+    s.unit        AS item_unit,
+    s.shelf       AS item_shelf,
+    s.available   AS item_available,
+    s.archived_at AS item_archived_at
+FROM kit_item k
+JOIN item_status s ON s.id = k.item_id;
+
+
+-- ---------------------------------------------------------------------------
+-- stocktake: a physical count of the shelves, and what it found.
+--
+-- Every inventory system drifts. Something gets put back on the wrong shelf,
+-- or walks out during an open lab, or was never logged in the first place --
+-- and none of that shows up in the loan table, because none of it went
+-- through the counter. A stocktake is the only thing that catches it: walk
+-- the room, scan everything, compare against what the database expected.
+--
+-- Expected on the shelf is derived, never stored:
+--
+--     quantity - (units on loan) - (units held out of service)
+--
+-- which is exactly `item_status.available`, so a stocktake cannot disagree
+-- with the rest of the system about what should have been there.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS stocktake (
+    id          INTEGER PRIMARY KEY,
+    started_at  TEXT    NOT NULL,
+    started_by  TEXT    NOT NULL,
+    scope_unit  TEXT,                       -- NULL => the whole stockroom
+    note        TEXT    NOT NULL DEFAULT '',
+    status      TEXT    NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open', 'finished', 'abandoned')),
+    finished_at TEXT,
+    finished_by TEXT
+);
+
+-- One open stocktake at a time. Two people counting the same shelves into
+-- different sessions produces two half-counts and two sets of phantom
+-- discrepancies, which is worse than not counting at all.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stocktake_one_open
+    ON stocktake ((1)) WHERE status = 'open';
+
+
+CREATE TABLE IF NOT EXISTS stocktake_scan (
+    id           INTEGER PRIMARY KEY,
+    stocktake_id INTEGER NOT NULL REFERENCES stocktake(id),
+    item_id      INTEGER NOT NULL REFERENCES item(id),
+    unit_id      INTEGER REFERENCES unit(id),   -- when the asset tag was scanned
+    quantity     INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    scanned_at   TEXT    NOT NULL,
+    scanned_by   TEXT    NOT NULL,
+
+    -- Scanning the same thing twice adds to the count rather than making a
+    -- second row, so this is genuinely one row per thing counted.
+    UNIQUE (stocktake_id, item_id, unit_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stocktake_scan_session
+    ON stocktake_scan (stocktake_id);
+
+
+-- ---------------------------------------------------------------------------
+-- item_photo: pictures of an item.
+--
+-- "Is this the right cable?" is a photo question, and no amount of
+-- description answers it as well as a picture of the connector.
+--
+-- The file itself lives on disk under config.PHOTO_DIR, not in the database:
+-- a stockroom's worth of photos would multiply the size of every nightly
+-- snapshot for data that never changes once written. This table is the index,
+-- and `filename` is a generated name, never anything the uploader chose.
+--
+-- Soft-deleted like everything else here: `deleted_at` hides the row and the
+-- file is left alone, so a mis-click is recoverable.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS item_photo (
+    id         INTEGER PRIMARY KEY,
+    item_id    INTEGER NOT NULL REFERENCES item(id),
+    filename   TEXT    NOT NULL UNIQUE,
+    caption    TEXT    NOT NULL DEFAULT '',
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    width      INTEGER,
+    height     INTEGER,
+    bytes      INTEGER,
+    created_at TEXT    NOT NULL,
+    created_by TEXT    NOT NULL,
+    deleted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_item_photo_item
+    ON item_photo (item_id) WHERE deleted_at IS NULL;
+
+-- At most one primary photo per item: it is the one shown on the item list
+-- and at the counter, and two of them would make that choice arbitrary.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_item_photo_one_primary
+    ON item_photo (item_id) WHERE is_primary = 1 AND deleted_at IS NULL;
 
 
 -- ===========================================================================

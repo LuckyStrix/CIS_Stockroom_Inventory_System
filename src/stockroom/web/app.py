@@ -41,6 +41,10 @@ from ..publish import worker as publish_worker
 from ..service import NotFound, StockroomError
 from . import (
     routes_accounts,
+    routes_admin,
+    routes_counter,
+    routes_kits,
+    routes_stocktake,
     routes_auth,
     routes_history,
     routes_items,
@@ -50,6 +54,7 @@ from . import (
 )
 from .deps import (
     CSRFError,
+    require_account,
     Forbidden,
     _LoginRedirect,
     is_public_path,
@@ -119,6 +124,17 @@ async def security_middleware(request: Request, call_next):
     request.state.csp_nonce = secrets.token_urlsafe(16)
 
     if request.method not in ("GET", "HEAD", "OPTIONS", "TRACE"):
+        # Refuse an oversized body before reading it. This middleware reads the
+        # whole body into memory to find the CSRF field, so without a ceiling a
+        # single large POST is a trivial way to exhaust a Pi's RAM. nginx caps
+        # this in production; development has no nginx in front of it.
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > config.MAX_UPLOAD_BYTES:
+            return _error_page(
+                request, 413, "Too large",
+                f"That upload is larger than the "
+                f"{config.MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+            )
         try:
             verify_csrf(request, await _submitted_csrf(request))
         except CSRFError as exc:
@@ -132,6 +148,12 @@ async def security_middleware(request: Request, call_next):
     # for its form; this is where that token actually reaches the browser.
     set_csrf_cookie(response, request)
     return response
+
+
+# How far into a multipart body to look for the CSRF field. Generous enough
+# for any number of ordinary text fields ahead of it, small enough that a 9 MB
+# photo is never scanned. Enforced by test_the_csrf_field_comes_first.
+_MULTIPART_SCAN_BYTES = 16 * 1024
 
 
 async def _submitted_csrf(request: Request) -> str:
@@ -154,13 +176,20 @@ async def _submitted_csrf(request: Request) -> str:
         return values[0] if values else ""
 
     if content_type.startswith("multipart/form-data"):
-        # No file uploads in this application, so rather than pull in a full
-        # multipart parse, find the one field we need.
+        # Find the one field we need rather than running a full multipart parse
+        # here, which would consume the stream that the route below still has
+        # to read.
+        #
+        # Photo uploads made this delicate. The body now contains binary JPEG
+        # data, so the search is bounded to the first slice of it: every form
+        # in this application puts `_csrf` first (there is a test for that),
+        # and scanning megabytes of image bytes with a regex for every upload
+        # is work with no possible payoff. `re.S` is gone for the same reason
+        # a bound was added -- `.` must not run away across binary content.
         import re
 
-        match = re.search(
-            rb'name="_csrf"\r\n\r\n(.*?)\r\n', body, re.S
-        )
+        head = body[:_MULTIPART_SCAN_BYTES]
+        match = re.search(rb'name="_csrf"\r\n\r\n([^\r\n]*)\r\n', head)
         return match.group(1).decode("utf-8", "replace") if match else ""
 
     return ""
@@ -270,6 +299,21 @@ def event_class(action: str) -> str:
     return ""
 
 
+def hold_class(state: str) -> str:
+    """Pill colour for a unit's condition.
+
+    'ok' is deliberately green rather than neutral: on the unit list most rows
+    are fine, and the eye should land on the ones that are not.
+    """
+    return {
+        "ok": "ok",
+        "broken": "out",
+        "repair": "warn",
+        "missing": "warn",
+        "gone": "grey",
+    }.get(state, "grey")
+
+
 def status_class(status: str) -> str:
     return {
         "pending": "warn", "approved": "info", "fulfilled": "ok",
@@ -283,6 +327,7 @@ templates.env.filters["date"] = fmt_date
 templates.env.filters["show"] = show
 templates.env.filters["event_class"] = event_class
 templates.env.filters["status_class"] = status_class
+templates.env.filters["hold_class"] = hold_class
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +400,8 @@ def health():
             "version": __version__,
             "schema_version": db.get_meta(conn, "schema_version"),
             "item_count": service.summary(conn)["item_count"],
+            # See publish/render.build_payload for why this is public.
+            "audit_head": service.audit_head(conn),
         }
     )
 
@@ -378,6 +425,44 @@ _PUBLIC_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
 }
+
+
+@app.get("/photos/{filename}", include_in_schema=False)
+def item_photo(request: Request, filename: str):
+    """Serve one stored item photo.
+
+    A route rather than a StaticFiles mount, for the same two reasons /public
+    is one: config.PHOTO_DIR is read per request rather than bound at import,
+    and the path is resolved and checked against the root on every call.
+
+    Requires a session. Photos are internal: the public page is a single
+    self-contained file with no asset directory, and giving it one is a
+    separate decision from being able to see what a cable looks like.
+    """
+    require_account(request)
+
+    root = config.PHOTO_DIR.resolve()
+    try:
+        target = (root / filename).resolve()
+    except (OSError, ValueError):
+        raise StarletteHTTPException(status_code=404, detail="Not found")
+
+    # The same guard as public_page: resolve both ends, then compare. A name
+    # out of the database still goes through it, because a path built from a
+    # stored string is exactly what becomes a traversal after a later change.
+    if not target.is_relative_to(root) or not target.is_file():
+        raise StarletteHTTPException(status_code=404, detail="Not found")
+
+    return FileResponse(
+        target,
+        media_type="image/jpeg",
+        headers={
+            # Filenames are random and content never changes once written, so
+            # this is safe to cache hard. Removing a photo removes the row, and
+            # nothing links to a filename that has no row.
+            "Cache-Control": "private, max-age=604800",
+        },
+    )
 
 
 @app.get("/public", include_in_schema=False)
@@ -422,5 +507,9 @@ app.include_router(routes_people.router)
 app.include_router(routes_history.router)
 app.include_router(routes_requests.router)
 app.include_router(routes_accounts.router)
+app.include_router(routes_admin.router)
+app.include_router(routes_counter.router)
+app.include_router(routes_kits.router)
+app.include_router(routes_stocktake.router)
 
 app.mount("/static", StaticFiles(directory=str(_PACKAGE_DIR / "static")), name="static")

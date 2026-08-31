@@ -31,9 +31,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import db, service
+from . import config, db, service
 from .service import (
     Actor,
     ConflictError,
@@ -106,6 +107,32 @@ class Request:
         return self.status == "approved" and self.kind in ("borrow", "new_item")
 
     @property
+    def age_days(self) -> float:
+        """How long this has been waiting, in days.
+
+        Nothing in this system emails anybody. A request is worked only if a
+        human sees it sitting there, so how long it has been sitting is the
+        single most useful thing to show about it.
+        """
+        stamp = _parse_stamp(self.created_at)
+        if stamp is None:
+            return 0.0
+        return (datetime.now(timezone.utc) - stamp).total_seconds() / 86400
+
+    @property
+    def is_stale(self) -> bool:
+        return self.is_open and self.age_days > config.REQUEST_STALE_DAYS
+
+    @property
+    def age_label(self) -> str:
+        days = self.age_days
+        if days < 1:
+            return "today"
+        if days < 2:
+            return "yesterday"
+        return f"{days:.0f} days ago"
+
+    @property
     def title(self) -> str:
         """One line describing what was asked for."""
         if self.kind == "borrow":
@@ -136,6 +163,18 @@ class OpenHours:
 # ---------------------------------------------------------------------------
 # reads
 # ---------------------------------------------------------------------------
+
+
+def _parse_stamp(stamp: str | None) -> datetime | None:
+    """Parse one of the ISO-8601 UTC strings db.utcnow() produces."""
+    if not stamp:
+        return None
+    try:
+        return datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
 
 
 def get_request(conn: sqlite3.Connection, request_id: int) -> Request:
@@ -187,6 +226,65 @@ def count_pending(conn: sqlite3.Connection) -> int:
             "SELECT COUNT(*) AS n FROM request WHERE status = 'pending'"
         ).fetchone()["n"]
     )
+
+
+def count_stale(conn: sqlite3.Connection) -> int:
+    """Pending requests older than the staleness threshold."""
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=config.REQUEST_STALE_DAYS)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM request WHERE status = 'pending' "
+            "AND created_at < ?",
+            (cutoff,),
+        ).fetchone()["n"]
+    )
+
+
+def overlapping_requests(
+    conn: sqlite3.Connection, request: Request
+) -> list[Request]:
+    """Other live borrow requests competing for the same item.
+
+    Advisory only. Approving a request still reserves nothing -- see
+    submit_borrow, which is right that a request is a conversation, not a
+    hold, and that the availability figure is the one number this system must
+    never get wrong.
+
+    What this fixes is narrower and real: staff had no way to notice they were
+    promising the same last camera to two people for the same weekend. It
+    tells them; it does not decide for them.
+
+    A NULL window means open-ended, so it overlaps everything. Because the
+    columns are ISO-8601 UTC strings they compare correctly as text, which is
+    the same property the overdue query relies on.
+    """
+    if request.kind != "borrow" or request.item_id is None:
+        return []
+
+    rows = conn.execute(
+        """
+        SELECT * FROM request_detail
+        WHERE kind = 'borrow'
+          AND item_id = ?
+          AND id <> ?
+          AND status IN ('pending', 'approved')
+          AND (? IS NULL OR needed_until IS NULL OR needed_until >= ?)
+          AND (? IS NULL OR needed_from  IS NULL OR needed_from  <= ?)
+        ORDER BY status, created_at
+        """,
+        (request.item_id, request.id,
+         request.needed_from, request.needed_from,
+         request.needed_until, request.needed_until),
+    )
+    return [Request.from_row(r) for r in rows]
+
+
+def competing_demand(conn: sqlite3.Connection, request: Request) -> int:
+    """Units already spoken for by overlapping requests, plus this one."""
+    others = overlapping_requests(conn, request)
+    return (request.quantity or 0) + sum(r.quantity or 0 for r in others)
 
 
 # ---------------------------------------------------------------------------

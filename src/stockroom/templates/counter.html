@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Counter{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>Counter</h1>
+    <p class="lede">
+      Scan everything, then say who it is for. Nothing is written until you
+      press Check out.
+    </p>
+  </div>
+  <div class="actions">
+    <a class="btn secondary" href="/counter/return">Returns →</a>
+  </div>
+</div>
+
+{# One form wraps the whole page. The basket travels in hidden fields, so the
+   browser holds the state and the server stays stateless -- see the module
+   docstring in web/routes_counter.py. The scan box submits to /counter/add
+   by default; the other buttons use formaction to send the same fields
+   somewhere else, which is why there is exactly one form here and not three. #}
+<form method="post" action="/counter/add">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+  <div class="card">
+    <div class="scan">
+      <input id="scan" name="code" type="search" autocomplete="off" autofocus
+             placeholder="Scan a barcode, or type a name…"
+             aria-label="Scan an item into the basket">
+      <button class="btn">Add</button>
+    </div>
+    {% if kits %}
+    <div class="actions mt">
+      <span class="muted small">Or add a kit:</span>
+      {% for kit in kits %}
+      <button class="btn small secondary" name="kit_id" value="{{ kit.id }}">
+        {{ kit.name }} ({{ kit.total_units }})
+      </button>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+  <h2>Basket{% if basket_total %} — {{ basket_total }} unit(s){% endif %}</h2>
+  <div class="tablewrap">
+  {% if lines %}
+  <table>
+    <thead><tr><th>Item</th><th>Location</th><th class="num">Qty</th><th>On the shelf</th><th></th></tr></thead>
+    <tbody>
+      {% for line in lines %}
+      <tr>
+        <td>
+          <a href="/items/{{ line.item.id }}">{{ line.item.name }}</a>
+          {% if line.item.barcode %}<div class="mono muted small">{{ line.item.barcode }}</div>{% endif %}
+          <input type="hidden" name="item_id" value="{{ line.item.id }}">
+        </td>
+        <td class="nowrap muted">{{ line.item.location }}</td>
+        <td class="num">
+          <input name="quantity" type="number" value="{{ line.quantity }}" min="1"
+                 class="qty" aria-label="Quantity of {{ line.item.name }}">
+        </td>
+        <td class="nowrap">
+          {% if line.short %}
+            <span class="pill out">only {{ line.item.available }} available</span>
+          {% else %}
+            <span class="muted">{{ line.item.available }} available</span>
+          {% endif %}
+        </td>
+        <td class="nowrap">
+          <button class="btn small secondary" formaction="/counter/remove"
+                  name="drop" value="{{ line.item.id }}">Remove</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Nothing scanned yet.</div>
+  {% endif %}
+  </div>
+
+  <div class="card mt">
+    <h2>Check out to</h2>
+    <div class="row">
+      <div class="field">
+        <label for="borrower">Borrower</label>
+        <input id="borrower" name="borrower" list="people" value="{{ borrower }}"
+               placeholder="name@rit.edu" autocomplete="off">
+        <datalist id="people">
+          {% for p in people %}<option value="{{ p.email }}">{{ p.name }}</option>{% endfor %}
+        </datalist>
+        <div class="hint">Pick an existing person, or type a new email address.</div>
+      </div>
+      <div class="field">
+        <label for="borrower_name">Name <span class="hint">(only for someone new)</span></label>
+        <input id="borrower_name" name="borrower_name" value="{{ borrower_name }}"
+               autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="due">Due back <span class="hint">(optional)</span></label>
+        <input id="due" name="due_at" type="date" value="{{ due_at }}">
+      </div>
+    </div>
+    <div class="field">
+      <label for="note">Note <span class="hint">(applies to every line)</span></label>
+      <input id="note" name="note" value="{{ note }}"
+             placeholder="e.g. senior project shoot, back Monday">
+    </div>
+
+    {% if blocked %}
+    <p class="flash error">
+      Not enough on the shelf for
+      {% for line in blocked %}{{ line.item.name }}{% if not loop.last %}, {% endif %}{% endfor %}.
+      Fix the quantities before checking out.
+    </p>
+    {% endif %}
+
+    <div class="actions">
+      <button class="btn" formaction="/counter/checkout"
+              {% if not lines or blocked %}disabled{% endif %}>
+        Check out {{ basket_total }} unit(s)
+      </button>
+      <span class="hint">
+        All of it in one go — if any line fails, none of it happens.
+      </span>
+    </div>
+  </div>
+</form>
+
+{% endblock %}

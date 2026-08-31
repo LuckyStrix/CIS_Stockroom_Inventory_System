@@ -24,7 +24,13 @@
     <td class="nowrap">{{ item.location }}</td>
     <td class="num">{{ item.available }}</td>
     <td class="num">{{ item.quantity }}</td>
-    <td>{{ status_pill(item) }}</td>
+    <td>
+      {{ status_pill(item) }}
+      {% if item.held_qty %}
+        <span class="pill {% if item.unaccounted_qty %}out{% else %}warn{% endif %}">
+          {{ item.held_qty }} out of service</span>
+      {% endif %}
+    </td>
   </tr>
   {% endfor %}
 {% endmacro %}
@@ -54,6 +60,15 @@
           <input type="number" name="quantity" value="{{ loan.quantity }}" min="1"
                  max="{{ loan.quantity }}" class="qty" aria-label="Quantity to return">
         {% endif %}
+        {# Blank means "back on the shelf". Anything else opens a hold in the
+           same transaction, linked to this loan -- which is what makes "who
+           had it when it broke" answerable later. #}
+        <select name="condition" class="compact" aria-label="Condition it came back in">
+          <option value="">Fine</option>
+          <option value="broken">Broken</option>
+          <option value="repair">Needs repair</option>
+          <option value="missing">Not returned</option>
+        </select>
         <button class="btn small">Return</button>
       </form>
     </td>

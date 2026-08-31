@@ -35,7 +35,7 @@ All identity logic is in one function:
 src/stockroom/web/deps.py :: current_account()
 ```
 
-Everything downstream — every route, all three service modules, the audit log —
+Everything downstream — every route, all five service modules, the audit log —
 receives an `Account` (or the `Actor` derived from it) and never asks where it
 came from. SSO replaces the body of that function and nothing else.
 

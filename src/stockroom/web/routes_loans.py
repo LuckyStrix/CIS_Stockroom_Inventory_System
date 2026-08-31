@@ -78,16 +78,28 @@ def return_loan(
     loan_id: int,
     quantity: str = Form(""),
     note: str = Form(""),
+    condition: str = Form(""),
     next: str = Form("/loans"),
 ):
-    """Return all or part of a loan; ``next`` sends the user back where they were."""
+    """Return all or part of a loan; ``next`` sends the user back where they were.
+
+    ``condition`` marks what came back as not fit to lend again, in the same
+    transaction. The moment a student hands over a dented lens is the only
+    moment anyone will reliably record it, so it is one form, not two.
+    """
     actor = require_staff(request).as_actor()
     try:
         loan = service.return_loan(
             get_conn(), actor=actor, loan_id=loan_id,
             quantity=int(quantity) if quantity.strip() else None,
             note=note,
+            condition=condition.strip() or None,
         )
     except (StockroomError, ValueError) as exc:
         return redirect(next, error=str(exc))
+    if condition.strip():
+        return redirect(next, ok=(
+            f"Returned {loan.item_name} from {loan.person_name}, marked "
+            f"{condition.strip()}."
+        ))
     return redirect(next, ok=f"Returned {loan.item_name} from {loan.person_name}.")

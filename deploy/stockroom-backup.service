@@ -15,6 +15,11 @@ ExecStart=/opt/stockroom/.venv/bin/stockroom backup
 # Housekeeping in the same nightly job: expired sessions and old login
 # attempts accumulate otherwise, and neither is worth keeping forever.
 ExecStart=/opt/stockroom/.venv/bin/stockroom prune
+# And check the result is actually healthy. This is the only thing that
+# routinely looks at the machine, so a failure here is how a dead backup
+# timer, a corrupt database or a broken audit chain gets noticed at all.
+# Non-zero exit marks the unit failed, which `systemctl status` then shows.
+ExecStart=/opt/stockroom/.venv/bin/stockroom doctor
 
 NoNewPrivileges=yes
 PrivateTmp=yes

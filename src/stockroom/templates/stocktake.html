@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Stocktake{% endblock %}
+{% block content %}
+
+{% if current %}
+<div class="headrow">
+  <div>
+    <h1>Counting {{ current.scope_label }}</h1>
+    <p class="lede">
+      Started {{ current.started_at|datetime }} by {{ current.started_by }}.
+      Scan everything on the shelves — scanning the same thing twice counts
+      two.
+    </p>
+  </div>
+  <div class="actions">
+    <form method="post" action="/stocktake/{{ current.id }}/finish">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn">Finish and reconcile</button>
+    </form>
+    <form method="post" action="/stocktake/{{ current.id }}/abandon"
+          data-confirm="Abandon this count? The scans so far are kept, but nothing is reconciled.">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn secondary">Abandon</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <form method="post" action="/stocktake/{{ current.id }}/scan">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="scan">
+      <input id="scan" name="code" type="search" autocomplete="off" autofocus
+             placeholder="Scan an item barcode or an asset tag…"
+             aria-label="Scan something on the shelf">
+      <button class="btn">Count it</button>
+    </div>
+  </form>
+</div>
+
+<div class="stats">
+  <span class="stat"><b>{{ progress.counted_items }}</b><span>Counted so far</span></span>
+  <span class="stat"><b>{{ progress.unscanned|length }}</b><span>Not yet seen</span></span>
+  <span class="stat {% if progress.short %}alert{% endif %}">
+    <b>{{ progress.short|length }}</b><span>Short</span></span>
+  <span class="stat {% if progress.over %}alert{% endif %}">
+    <b>{{ progress.over|length }}</b><span>Unexpected</span></span>
+</div>
+
+<h2>Still to find</h2>
+<div class="tablewrap">
+{% if progress.unscanned %}
+<table>
+  <thead><tr><th>Item</th><th>Location</th><th class="num">Expected</th></tr></thead>
+  <tbody>
+    {% for d in progress.unscanned %}
+    <tr>
+      <td><a href="/items/{{ d.item_id }}">{{ d.item_name }}</a>
+        {% if d.barcode %}<div class="mono muted small">{{ d.barcode }}</div>{% endif %}</td>
+      <td class="nowrap muted">{{ d.location }}</td>
+      <td class="num">{{ d.expected }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Everything expected has been seen.</div>
+{% endif %}
+</div>
+
+{% else %}
+
+<div class="headrow">
+  <div>
+    <h1>Stocktake</h1>
+    <p class="lede">
+      Walk the room, scan what is actually there, and see where the shelves
+      and the database disagree. This is the only thing that catches drift —
+      a tripod put back on the wrong shelf never went through the counter, so
+      nothing else here can notice it.
+    </p>
+  </div>
+</div>
+
+<div class="card narrow">
+  <h2>Start a count</h2>
+  <form method="post" action="/stocktake">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="scope_unit">What are you counting?</label>
+      <select id="scope_unit" name="scope_unit">
+        <option value="">The whole stockroom</option>
+        {% for u in storage_units %}<option value="{{ u }}">{{ u }}</option>{% endfor %}
+      </select>
+      <div class="hint">
+        One storage unit at a time is usually more realistic than the whole
+        room in one go.
+      </div>
+    </div>
+    <div class="field">
+      <label for="note">Note <span class="hint">(optional)</span></label>
+      <input id="note" name="note" placeholder="e.g. end of semester count">
+    </div>
+    <button class="btn">Start counting</button>
+  </form>
+</div>
+{% endif %}
+
+<h2>Past counts</h2>
+<div class="tablewrap">
+{% if history %}
+<table>
+  <thead><tr><th>Started</th><th>Scope</th><th>By</th><th>Status</th></tr></thead>
+  <tbody>
+    {% for s in history %}
+    <tr>
+      <td><a href="/stocktake/{{ s.id }}">{{ s.started_at|datetime }}</a></td>
+      <td>{{ s.scope_label }}</td>
+      <td class="muted">{{ s.started_by }}</td>
+      <td>
+        {% if s.status == 'open' %}<span class="pill info">In progress</span>
+        {% elif s.status == 'finished' %}<span class="pill ok">Finished</span>
+        {% else %}<span class="pill grey">Abandoned</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Nothing counted yet.</div>
+{% endif %}
+</div>
+
+{% endblock %}

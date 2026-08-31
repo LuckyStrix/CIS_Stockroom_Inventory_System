@@ -214,3 +214,22 @@ select.compact{width:auto;padding:5px 8px;font-size:.85rem}
   .headrow{flex-direction:column}
   .headrow .actions{width:100%}
 }
+
+/* Server-rendered SVG charts (reports.bar_chart). The bars carry width= and
+   the colours come from here, because a style="" attribute would be dropped
+   by the CSP with no error and leave every bar invisible. */
+.chart{max-width:100%;height:auto;display:block;margin:4px 0 10px}
+.chart-bar{fill:var(--accent)}
+.chart-label{fill:var(--text);font-size:12px}
+.chart-value{fill:var(--muted);font-size:12px}
+
+/* Item photos. Sized in the stylesheet because the CSP drops style=""; the
+   img tags carry width=/height= attributes so the layout does not jump while
+   they load. */
+.photos{display:flex;flex-wrap:wrap;gap:12px}
+.photo{margin:0;max-width:220px}
+.photo img{width:100%;height:auto;border-radius:var(--radius);border:1px solid var(--line);
+           background:var(--surface-2);display:block}
+.photo.main img{border-color:var(--accent)}
+.photo figcaption{font-size:12px;color:var(--muted);margin-top:4px}
+.photo figcaption .actions{gap:10px;margin-top:2px}

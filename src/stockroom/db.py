@@ -32,7 +32,7 @@ from pathlib import Path
 
 from . import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = Path(__file__).with_name("schema.sql")
 _SCHEMA_FTS_SQL = Path(__file__).with_name("schema_fts.sql")
@@ -163,6 +163,56 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+# Columns added to tables that already existed in an earlier schema version.
+# CREATE TABLE IF NOT EXISTS cannot express these: the table is already there,
+# so the new column in schema.sql is ignored for anyone upgrading.
+#
+# Every entry is also declared in schema.sql, so a fresh database gets it from
+# the CREATE TABLE and an existing one gets it from here. The two are checked
+# against each other by test_a_migrated_database_matches_a_fresh_one.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # v3: tamper-evident audit log (see service.log_event)
+    ("event", "prev_hash", "TEXT"),
+    ("event", "hash", "TEXT"),
+    # v3: per-unit tracking opt-in (see service.create_unit)
+    ("item", "tracked", "INTEGER NOT NULL DEFAULT 0"),
+    # v3: duplicate-person merges (see service.merge_people)
+    ("person", "merged_into_id", "INTEGER REFERENCES person(id)"),
+)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Add any column in :data:`_ADDED_COLUMNS` that this database lacks.
+
+    Runs *before* schema.sql, not after, because the views in that file select
+    columns added here -- creating the view against an old table would fail
+    before the migration ever got a chance to run.
+
+    Idempotent in both directions: a brand new database has none of the tables
+    yet and skips every entry, then schema.sql creates them with the columns
+    already declared.
+    """
+    for table, column, decl in _ADDED_COLUMNS:
+        if not _table_exists(conn, table):
+            continue
+        if column in _column_names(conn, table):
+            continue
+        # ALTER TABLE ADD COLUMN cannot take a non-constant default, which is
+        # why every entry above is either nullable or has a literal default.
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Create or upgrade the schema. Safe to run on every start.
 
@@ -171,6 +221,10 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     boot so a fresh Pi comes up with a working database and no manual step.
     """
     conn = connect(db_path)
+
+    # Widen existing tables first: schema.sql's views select columns that an
+    # older database does not have yet.
+    _ensure_columns(conn)
 
     conn.executescript(_SCHEMA_SQL.read_text())
 
@@ -200,9 +254,11 @@ def _migrate(conn: sqlite3.Connection, *, from_version: int) -> None:
     exists for the steps that cannot be expressed that way: backfilling a new
     column, or reshaping existing rows.
 
-    Version 1 -> 2 (accounts, sessions, requests) is purely additive, so there
-    is nothing to do beyond recording the new version. Downgrades are refused
-    rather than guessed at.
+    New *columns* are handled by :func:`_ensure_columns`, which runs earlier
+    and unconditionally. What is left for this function is data: backfilling a
+    value that cannot be defaulted, or reshaping existing rows.
+
+    Downgrades are refused rather than guessed at.
     """
     if from_version > SCHEMA_VERSION:
         raise RuntimeError(
@@ -210,8 +266,18 @@ def _migrate(conn: sqlite3.Connection, *, from_version: int) -> None:
             f"version of stockroom only understands {SCHEMA_VERSION}. "
             "Upgrade the application rather than downgrading the database."
         )
-    # 1 -> 2: additive only; the schema file has already created the new
-    # tables. Future migrations append their steps here.
+
+    # 1 -> 2: accounts, sessions and requests. Purely additive; the schema
+    # file has already created the tables and there is no data to reshape.
+
+    if from_version < 3:
+        # 2 -> 3: the audit log became a hash chain. Every pre-existing event
+        # predates prev_hash/hash, so the chain is computed over them once,
+        # in id order. Imported here rather than at module scope because
+        # service imports db.
+        from .service import rebuild_audit_chain
+
+        rebuild_audit_chain(conn)
 
 
 def _backfill_fts(conn: sqlite3.Connection) -> None:
@@ -237,11 +303,24 @@ def _backfill_fts(conn: sqlite3.Connection) -> None:
         )
 
 
-def backup(destination: Path, db_path: Path | str | None = None) -> Path:
+class BackupCorrupt(RuntimeError):
+    """A snapshot was written but did not verify. Treat it as no backup."""
+
+
+def backup(
+    destination: Path, db_path: Path | str | None = None, *, verify: bool = True
+) -> Path:
     """Write a consistent snapshot of the database to ``destination``.
 
     Uses SQLite's online backup API, which is safe to run while the service
     is live -- unlike copying the .db file, which can catch a torn WAL.
+
+    ``verify`` re-opens the snapshot and runs ``PRAGMA integrity_check`` on
+    it. That is not paranoia: a database corrupted by a failing SD card copies
+    without complaint, so an unverified nightly job cheerfully produces thirty
+    days of unusable backups and reports success every time. A snapshot that
+    does not verify is deleted and :class:`BackupCorrupt` is raised, because a
+    file that looks like a backup and is not is worse than no file at all.
     """
     conn = connect(db_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -251,4 +330,36 @@ def backup(destination: Path, db_path: Path | str | None = None) -> Path:
             conn.backup(target)
     finally:
         target.close()
+
+    if verify:
+        problem = verify_file(destination)
+        if problem is not None:
+            destination.unlink(missing_ok=True)
+            raise BackupCorrupt(f"{destination.name} failed verification: {problem}")
     return destination
+
+
+def verify_file(path: Path) -> str | None:
+    """Run SQLite's own integrity checks over a database file.
+
+    Returns ``None`` when the file is sound, or a short description of the
+    first problem found. Used on fresh snapshots and by ``stockroom doctor``.
+    """
+    if not path.exists():
+        return "file does not exist"
+    try:
+        probe = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return f"cannot open: {exc}"
+    try:
+        result = probe.execute("PRAGMA integrity_check").fetchone()
+        if result is None or result[0] != "ok":
+            return str(result[0]) if result else "integrity_check returned nothing"
+        violations = probe.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            return f"{len(violations)} foreign key violation(s)"
+    except sqlite3.DatabaseError as exc:
+        return f"unreadable: {exc}"
+    finally:
+        probe.close()
+    return None

@@ -30,6 +30,20 @@ every change.
 - **Print barcode labels** — Code128 labels laid out for Avery 5160 sheets.
   Any USB scanner works; they behave as keyboards.
 - **Import your existing spreadsheet** — CSV import with a dry run first.
+- **Track individual units** — for gear where it matters *which* one. Each
+  camera body gets its own asset tag, so a fault is recorded against the right
+  one rather than against "the cameras".
+- **Record what is broken** — damaged, in repair, missing or written off, with
+  a note and a link to the loan it came back on. Availability drops; the
+  quantity owned does not, so the shelf can say "we bought ten and two are
+  unaccounted for".
+- **Work a counter queue** — scan a whole basket, or a saved kit, and check it
+  all out to one person in a single transaction. Returns work the same way.
+- **Count the shelves** — a stocktake walks the room with a scanner and reports
+  where the shelves and the database disagree. It is the only thing that
+  catches drift, because drift never went through the counter.
+- **See what a year adds up to** — most borrowed, never borrowed, typical time
+  out, what is unaccounted for. The material for "what should we buy next?".
 - **Accounts and requests** — people sign up with their RIT email, staff
   approve them, and they can then ask to borrow equipment, suggest something
   the stockroom should own, or ask for the room to be open at a particular
@@ -75,7 +89,9 @@ stockroom history --item 12      # one item's full history
 stockroom import stock.csv       # dry run; add --commit to apply
 stockroom export > backup.csv
 stockroom publish                # rebuild the public page
-stockroom backup                 # snapshot the database
+stockroom backup                 # snapshot it, verify it, send it off the Pi
+stockroom doctor                 # is any of this still working?
+stockroom report                 # usage, and what nobody borrows
 ```
 
 ## How it is put together
@@ -83,6 +99,11 @@ stockroom backup                 # snapshot the database
 | Path | What |
 |---|---|
 | `src/stockroom/service.py` | Inventory mutations. Invariants and the audit log |
+| `src/stockroom/kits.py` | Named bundles, expanded into a basket at the counter |
+| `src/stockroom/stocktake.py` | Physical counts and reconciliation |
+| `src/stockroom/reports.py` | Usage figures and server-rendered SVG charts |
+| `src/stockroom/diagnostics.py` | The health checks behind `stockroom doctor` |
+| `src/stockroom/backup_targets.py` | Getting a snapshot off the SD card |
 | `src/stockroom/accounts.py` | Accounts, passwords, sessions, lockout |
 | `src/stockroom/requests_service.py` | The three request workflows |
 | `src/stockroom/security.py` | Hashing, tokens, CSRF, rate limiting |
@@ -93,15 +114,24 @@ stockroom backup                 # snapshot the database
 | `deploy/` | Setup and hardening scripts, nginx config, systemd units |
 | `docs/` | Architecture, data model, security, operations, Pi setup, SSO plan |
 
-Python 3.11, FastAPI, Jinja2, SQLite. Five runtime dependencies, no ORM, no
+Python 3.11, FastAPI, Jinja2, SQLite. Six runtime dependencies, no ORM, no
 build step, no JavaScript framework. Password hashing, session tokens, CSRF
 and rate limiting are all standard library — authentication added **zero** new
 dependencies.
 
+The strict CSP shapes more than the security story: with no inline script and
+no external origin allowed, charts are server-rendered SVG rather than a
+charting library, and the counter's basket lives in hidden form fields rather
+than in JavaScript. Both turned out simpler than the thing they replaced.
+
 The rule everything else follows:
 
-> Every mutation goes through `service.py`, which writes the change and its
-> audit-log row in the same transaction.
+> Every mutation goes through a service module, which writes the change and
+> its audit-log row in the same transaction.
+
+The audit log is also a hash chain: each entry covers the one before it, so an
+edited or deleted row is detectable rather than silent. `stockroom doctor`
+checks it, and the head hash is published in `inventory.json` and `/health`.
 
 More in **[docs/architecture.md](docs/architecture.md)**.
 
@@ -129,4 +159,9 @@ mostly configuration. See **[docs/sso-integration.md](docs/sso-integration.md)**
 
 ## License
 
-Internal tool for the Carlson Center for Imaging Science.
+MIT — see [LICENSE](LICENSE).
+
+Built for the stockroom at RIT's Carlson Center for Imaging Science, but
+nothing in it is specific to that room: it is a general small-inventory system
+with an audit trail, and the RIT-specific parts are the default organisation
+name and the `@rit.edu` sign-up check, both of which are configuration.

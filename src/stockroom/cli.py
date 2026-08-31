@@ -15,6 +15,8 @@ checking what the database thinks is going on.
     stockroom publish                    rebuild the public page now
     stockroom backup                     snapshot the database
     stockroom status                     headline numbers
+    stockroom doctor                     check the system is still healthy
+    stockroom report                     usage, and what nobody borrows
 
     stockroom user create --admin        make the first administrator
     stockroom user list                  accounts, pending first
@@ -38,7 +40,18 @@ import logging
 import sys
 from pathlib import Path
 
-from . import __version__, accounts, config, csvio, db, security, service
+from . import (
+    __version__,
+    accounts,
+    backup_targets,
+    config,
+    csvio,
+    db,
+    diagnostics,
+    reports,
+    security,
+    service,
+)
 from .publish import worker as publish_worker
 from .service import Actor, StockroomError
 
@@ -203,24 +216,105 @@ def cmd_publish(args) -> int:
 
 
 def cmd_backup(args) -> int:
-    """Snapshot the database, then prune old snapshots.
+    """Snapshot the database, verify it, then send it off the machine.
 
     Uses SQLite's online backup API, so this is safe to run from cron while
     the web service is live and serving checkouts.
+
+    The snapshot is verified before it counts: a database corrupted by a
+    failing SD card copies without complaint, so an unchecked nightly job
+    produces a month of unusable files and reports success every night.
+
+    Off-box copies (a USB stick, an rclone remote) are attempted after the
+    local snapshot succeeds. A failure there never invalidates the local copy,
+    but it does set a non-zero exit code, because a backup that quietly stops
+    leaving the building is only discovered on the day it was needed.
     """
     _conn()
     target = Path(args.output) if args.output else (
         config.BACKUP_DIR / f"stockroom-{db.utcnow().replace(':', '')}.db"
     )
-    db.backup(target)
-    print(f"Wrote {target} ({target.stat().st_size:,} bytes)")
+    try:
+        db.backup(target)
+    except db.BackupCorrupt as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        print("The snapshot was discarded. Run `stockroom doctor` -- the "
+              "live database may be damaged.", file=sys.stderr)
+        return 1
+    print(f"Wrote {target} ({target.stat().st_size:,} bytes, verified)")
 
     if args.output is None and config.BACKUP_KEEP > 0:
         snapshots = sorted(config.BACKUP_DIR.glob("stockroom-*.db"))
         for stale in snapshots[: max(0, len(snapshots) - config.BACKUP_KEEP)]:
             stale.unlink()
             print(f"Pruned {stale.name}")
+
+    if args.no_upload:
+        return 0
+
+    targets = backup_targets.configured_targets()
+    if not targets:
+        return 0
+    failures = backup_targets.copy_to_targets(target, targets)
+    for target_obj in targets:
+        if not any(f.target == target_obj.name for f in failures):
+            print(f"Copied to {target_obj.name}")
+    for failure in failures:
+        print(f"Error: could not copy to {failure}", file=sys.stderr)
+    return 1 if failures else 0
+
+
+def cmd_report(args) -> int:
+    """Usage figures, for the conversation about next year's budget."""
+    conn = _conn()
+    head = reports.headline(conn, days=args.days)
+    print(f"CIS Stockroom — the last {head['window_days']} days")
+    print(f"  {head['loans']} checkout(s), {head['units']} unit(s), "
+          f"{head['borrowers']} borrower(s)")
+
+    for title, rows, suffix in [
+        ("Borrowed most often", reports.most_borrowed(conn, days=args.days), "loans"),
+        ("Typical days out (median)", reports.loan_durations(conn, days=args.days), "days"),
+        ("Busiest borrowers", reports.busiest_borrowers(conn, days=args.days), "loans"),
+        ("Unaccounted for", reports.unaccounted(conn), "units"),
+        ("Out of service", reports.out_of_service(conn), "units"),
+    ]:
+        print(f"\n{title}")
+        if not rows:
+            print("  (nothing)")
+            continue
+        for row in rows[: args.limit]:
+            detail = f"  ({row.detail})" if row.detail else ""
+            print(f"  {row.label[:38]:<38}{row.display:>7} {suffix}{detail}")
+
+    stale = reports.never_borrowed(conn, days=args.days)
+    print(f"\nNot borrowed in {args.days} days: {len(stale)} item(s)")
+    for row in stale[: args.limit]:
+        print(f"  {row.label[:38]:<38}{row.display:>7} owned  ({row.detail})")
     return 0
+
+
+def cmd_doctor(args) -> int:
+    """Check that the system is still healthy, and say so out loud.
+
+    Written for a machine nobody watches. Every check is a read, so this is
+    safe to run at any time, and it exits non-zero on failure so the nightly
+    timer records a problem rather than a green tick.
+    """
+    conn = _conn()
+    report = diagnostics.run_all(conn, skip_remote=args.skip_remote)
+
+    for check in report.checks:
+        print(f"  {check.mark} {check.name:<24}{check.detail}")
+
+    print()
+    if report.ok:
+        print(f"All {len(report.checks)} checks passed.")
+        return 0
+    print(f"{len(report.failures)} of {len(report.checks)} checks FAILED:")
+    for check in report.failures:
+        print(f"  - {check.name}: {check.detail}")
+    return 1
 
 
 def cmd_prune(args) -> int:
@@ -251,6 +345,7 @@ def cmd_status(args) -> int:
         ("Item types", "item_count"), ("Total units", "total_units"),
         ("Available", "units_available"), ("Checked out", "units_out"),
         ("Open loans", "open_loan_count"), ("Overdue", "overdue_count"),
+        ("Out of service", "units_held"), ("Unaccounted", "units_unaccounted"),
         ("Low stock", "low_stock_count"), ("People", "person_count"),
         ("Logged changes", "event_count"),
     ]:
@@ -500,9 +595,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("backup", help="snapshot the database")
     p.add_argument("--output", help="write here instead of the rotating backup dir")
+    p.add_argument("--no-upload", action="store_true",
+                   help="skip the configured off-box copies")
     p.set_defaults(func=cmd_backup)
 
     sub.add_parser("status", help="headline numbers").set_defaults(func=cmd_status)
+
+    p = sub.add_parser("report", help="usage figures and deaccession candidates")
+    p.add_argument("--days", type=int, default=reports.DEFAULT_WINDOW_DAYS,
+                   help="window to report on (default 365)")
+    p.add_argument("--limit", type=int, default=10,
+                   help="rows per section (default 10)")
+    p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("doctor", help="check the system is still healthy")
+    p.add_argument("--skip-remote", action="store_true",
+                   help="do not contact the backup remote (offline, or in a hurry)")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("prune", help="delete expired sessions and old login attempts")
     p.add_argument("--keep-days", type=int, default=90,

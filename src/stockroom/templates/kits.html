@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Kits{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>Kits</h1>
+    <p class="lede">
+      Bundles that go out together. A kit is a shortcut for filling the
+      counter basket — nothing is ever lent “as a kit”, so changing one never
+      touches a loan it produced.
+    </p>
+  </div>
+</div>
+
+<div class="filters">
+  {% for key, label in [('', 'Active'), ('archived', 'Archived')] %}
+    <a class="chip {% if show == key %}on{% endif %}" href="/kits?show={{ key }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div class="tablewrap">
+{% if kits %}
+<table>
+  <thead><tr><th>Kit</th><th>Contents</th><th class="num">Units</th><th>Ready?</th></tr></thead>
+  <tbody>
+    {% for kit in kits %}
+    <tr>
+      <td>
+        <a href="/kits/{{ kit.id }}"><strong>{{ kit.name }}</strong></a>
+        {% if kit.description %}<div class="muted small">{{ kit.description }}</div>{% endif %}
+      </td>
+      <td class="muted small">
+        {% for line in kit.lines %}
+          {{ line.quantity }} × {{ line.item_name }}{% if not loop.last %}, {% endif %}
+        {% else %}
+          <em>empty</em>
+        {% endfor %}
+      </td>
+      <td class="num">{{ kit.total_units }}</td>
+      <td class="nowrap">
+        {% if kit.is_archived %}<span class="pill grey">Archived</span>
+        {% elif not kit.lines %}<span class="pill warn">Empty</span>
+        {% elif kit.is_complete %}<span class="pill ok">Complete</span>
+        {% else %}<span class="pill out">{{ kit.missing|length }} short</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No kits yet.</div>
+{% endif %}
+</div>
+
+<div class="card narrow mt">
+  <h2>New kit</h2>
+  <form method="post" action="/kits">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="name">Name</label>
+      <input id="name" name="name" required placeholder="e.g. Portrait kit 2">
+    </div>
+    <div class="field">
+      <label for="description">Description <span class="hint">(optional)</span></label>
+      <input id="description" name="description" placeholder="What it is for">
+    </div>
+    <button class="btn">Create</button>
+  </form>
+</div>
+
+{% endblock %}
