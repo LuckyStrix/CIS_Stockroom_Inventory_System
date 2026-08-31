@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Request an account{% endblock %}
+{% block content %}
+<div class="narrow">
+  <h1>Request an account</h1>
+  <p class="lede">
+    Accounts let you borrow equipment and file requests. A staff member
+    approves each one, so there is a short wait before you can sign in.
+  </p>
+
+  <div class="card">
+    <form method="post" action="/register">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="row">
+        <div class="field">
+          <label for="first_name">First name</label>
+          <input id="first_name" name="first_name" required autofocus autocomplete="given-name">
+        </div>
+        <div class="field">
+          <label for="last_name">Last name</label>
+          <input id="last_name" name="last_name" required autocomplete="family-name">
+        </div>
+      </div>
+      <div class="field">
+        <label for="email">RIT email</label>
+        <input id="email" name="email" type="email" required autocomplete="email"
+               placeholder="abc1234@rit.edu">
+        <div class="hint">Must be an @rit.edu address.</div>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required
+               autocomplete="new-password" minlength="{{ min_length }}">
+        <div class="hint">
+          At least {{ min_length }} characters. A few unrelated words is both
+          stronger and easier to remember than a short password with symbols in it.
+        </div>
+      </div>
+      <div class="field">
+        <label for="password_confirm">Confirm password</label>
+        <input id="password_confirm" name="password_confirm" type="password"
+               required autocomplete="new-password">
+      </div>
+      <button class="btn wide">Request an account</button>
+    </form>
+  </div>
+
+  <p class="muted center">Already have one? <a href="/login">Sign in</a>.</p>
+</div>
+{% endblock %}

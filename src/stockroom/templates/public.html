@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stockroom Inventory — {{ org }}</title>
 <meta name="description" content="Live equipment availability for the {{ org }} stockroom.">
+{% if csp %}<meta http-equiv="Content-Security-Policy" content="{{ csp }}">{% endif %}
 <style>
 :root{
   --bg:#f6f7f9; --surface:#fff; --line:#e3e6ea; --text:#14181d; --muted:#657084;
@@ -61,6 +62,13 @@ tbody tr:last-child td{border-bottom:0}
 .pill.out{background:var(--out-bg);color:var(--out)}
 a{color:var(--accent)}
 .empty{padding:40px;text-align:center;color:var(--muted)}
+.hours{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--accent);
+  border-radius:var(--radius);padding:14px 18px;margin-bottom:18px}
+.hours h2{margin:0 0 8px;font-size:.78rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.hours ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px 22px}
+.hours li{font-size:.92rem}
+.hours .time{color:var(--muted);margin-left:6px;font-variant-numeric:tabular-nums}
+.hours .note{color:var(--muted);margin-left:6px;font-style:italic}
 footer{margin-top:26px;color:var(--muted);font-size:.82rem;line-height:1.7}
 footer code{font-size:.8rem}
 @media (max-width:620px){ .desc{display:none} h1{font-size:1.25rem} }
@@ -80,6 +88,21 @@ footer code{font-size:.8rem}
   <div class="stat"><b>{{ summary.units_out }}</b><span>Checked out</span></div>
   <div class="stat"><b>{{ summary.low_stock_count }}</b><span>Low stock</span></div>
 </section>
+
+{% if open_hours %}
+<section class="hours" aria-label="Stockroom open hours">
+  <h2>Stockroom open hours</h2>
+  <ul>
+    {% for slot in open_hours %}
+    <li>
+      <strong>{{ slot.start[:10] }}</strong>
+      <span class="time">{{ slot.start[11:16] }}–{{ slot.end[11:16] }}</span>
+      {% if slot.note %}<span class="note">{{ slot.note }}</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
 
 <div class="controls">
   <input id="q" type="search" placeholder="Search name, description, location or barcode…"

@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Accounts{% endblock %}
+{% block content %}
+
+<h1>Accounts</h1>
+<p class="lede">
+  {{ accounts|length }} account(s). New signups appear here as
+  <span class="pill warn">pending</span> and cannot sign in until approved.
+</p>
+
+<div class="filters">
+  {% for key, label in [('', 'All'), ('pending', 'Pending'), ('active', 'Active'), ('disabled', 'Disabled')] %}
+    <a class="chip {% if status_filter == key %}on{% endif %}"
+       href="/accounts{% if key %}?status={{ key }}{% endif %}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div class="tablewrap">
+{% if accounts %}
+<table>
+  <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
+  <tbody>
+    {% for a in accounts %}
+    <tr>
+      <td><strong>{{ a.name }}</strong>
+        <div class="muted small">joined {{ a.created_at|date }}</div></td>
+      <td class="mono">{{ a.email }}</td>
+      <td>
+        {% if viewer.is_admin and a.id != viewer.id %}
+        <form method="post" action="/accounts/{{ a.id }}/role" class="inline">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <select name="role" class="compact">
+            {% for r in roles %}
+            <option value="{{ r }}" {% if r == a.role %}selected{% endif %}>{{ r }}</option>
+            {% endfor %}
+          </select>
+          <button class="btn small secondary">Set</button>
+        </form>
+        {% else %}
+          <span class="pill grey">{{ a.role }}</span>
+        {% endif %}
+      </td>
+      <td><span class="pill {{ a.status|status_class }}">{{ a.status }}</span></td>
+      <td class="nowrap">
+        <div class="actions">
+        {% if a.status == 'pending' %}
+          <form method="post" action="/accounts/{{ a.id }}/approve" class="inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <button class="btn small">Approve</button>
+          </form>
+          <form method="post" action="/accounts/{{ a.id }}/status" class="inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="status" value="disabled">
+            <button class="btn small secondary">Decline</button>
+          </form>
+        {% elif a.status == 'active' and a.id != viewer.id %}
+          <form method="post" action="/accounts/{{ a.id }}/status" class="inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="status" value="disabled">
+            <button class="btn small secondary">Disable</button>
+          </form>
+        {% elif a.status == 'disabled' %}
+          <form method="post" action="/accounts/{{ a.id }}/status" class="inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="status" value="active">
+            <button class="btn small secondary">Re-enable</button>
+          </form>
+        {% else %}
+          <span class="muted small">that's you</span>
+        {% endif %}
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}<div class="empty">No accounts match.</div>{% endif %}
+</div>
+{% endblock %}

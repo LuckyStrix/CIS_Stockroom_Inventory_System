@@ -12,6 +12,9 @@ EnvironmentFile=/etc/stockroom.env
 # Uses SQLite's online backup API, so this is safe to run while the web
 # service is live. Old snapshots are pruned to STOCKROOM_BACKUP_KEEP.
 ExecStart=/opt/stockroom/.venv/bin/stockroom backup
+# Housekeeping in the same nightly job: expired sessions and old login
+# attempts accumulate otherwise, and neither is worth keeping forever.
+ExecStart=/opt/stockroom/.venv/bin/stockroom prune
 
 NoNewPrivileges=yes
 PrivateTmp=yes

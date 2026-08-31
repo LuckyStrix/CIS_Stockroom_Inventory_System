@@ -32,7 +32,7 @@ from pathlib import Path
 
 from . import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = Path(__file__).with_name("schema.sql")
 _SCHEMA_FTS_SQL = Path(__file__).with_name("schema_fts.sql")
@@ -179,12 +179,39 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
         _backfill_fts(conn)
 
     with transaction(conn):
-        if get_meta(conn, "schema_version") is None:
+        existing = get_meta(conn, "schema_version")
+        if existing is None:
             set_meta(conn, "schema_version", str(SCHEMA_VERSION))
             set_meta(conn, "created_at", utcnow())
+        elif int(existing) != SCHEMA_VERSION:
+            _migrate(conn, from_version=int(existing))
+            set_meta(conn, "schema_version", str(SCHEMA_VERSION))
         if get_meta(conn, "barcode_counter") is None:
             set_meta(conn, "barcode_counter", "0")
     return conn
+
+
+def _migrate(conn: sqlite3.Connection, *, from_version: int) -> None:
+    """Carry an older database forward to :data:`SCHEMA_VERSION`.
+
+    The schema file itself is written entirely in ``CREATE ... IF NOT EXISTS``
+    and ``DROP``-then-``CREATE`` form, so *adding* tables, views and indexes
+    needs no work here -- running the file above already did it. This function
+    exists for the steps that cannot be expressed that way: backfilling a new
+    column, or reshaping existing rows.
+
+    Version 1 -> 2 (accounts, sessions, requests) is purely additive, so there
+    is nothing to do beyond recording the new version. Downgrades are refused
+    rather than guessed at.
+    """
+    if from_version > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"This database is at schema version {from_version}, but this "
+            f"version of stockroom only understands {SCHEMA_VERSION}. "
+            "Upgrade the application rather than downgrading the database."
+        )
+    # 1 -> 2: additive only; the schema file has already created the new
+    # tables. Future migrations append their steps here.
 
 
 def _backfill_fts(conn: sqlite3.Connection) -> None:

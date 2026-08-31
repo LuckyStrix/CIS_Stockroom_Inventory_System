@@ -30,6 +30,10 @@ every change.
 - **Print barcode labels** — Code128 labels laid out for Avery 5160 sheets.
   Any USB scanner works; they behave as keyboards.
 - **Import your existing spreadsheet** — CSV import with a dry run first.
+- **Accounts and requests** — people sign up with their RIT email, staff
+  approve them, and they can then ask to borrow equipment, suggest something
+  the stockroom should own, or ask for the room to be open at a particular
+  time. Confirmed open hours appear on the public page.
 
 ## Quick start (development)
 
@@ -39,11 +43,14 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 
 .venv/bin/stockroom init
+.venv/bin/stockroom user create --first-name Your --last-name Name \
+    --email you@rit.edu --admin
 .venv/bin/stockroom import examples/sample-inventory.csv --commit
 .venv/bin/uvicorn stockroom.web.app:app --reload
 ```
 
-Then open <http://127.0.0.1:8000/>. The public page is at `/public/`.
+Then open <http://127.0.0.1:8000/> and sign in. The public page is at
+`/public/` and needs no account.
 
 Run the tests with `.venv/bin/pytest`.
 
@@ -75,16 +82,21 @@ stockroom backup                 # snapshot the database
 
 | Path | What |
 |---|---|
-| `src/stockroom/service.py` | **All mutations.** Invariants and the audit log |
+| `src/stockroom/service.py` | Inventory mutations. Invariants and the audit log |
+| `src/stockroom/accounts.py` | Accounts, passwords, sessions, lockout |
+| `src/stockroom/requests_service.py` | The three request workflows |
+| `src/stockroom/security.py` | Hashing, tokens, CSRF, rate limiting |
 | `src/stockroom/schema.sql` | Tables and views |
 | `src/stockroom/web/` | FastAPI routes and templates |
 | `src/stockroom/publish/` | Public page rendering and delivery |
 | `src/stockroom/cli.py` | The `stockroom` command |
-| `deploy/` | Setup script and systemd units |
-| `docs/` | Architecture, data model, operations, Pi setup, SSO plan |
+| `deploy/` | Setup and hardening scripts, nginx config, systemd units |
+| `docs/` | Architecture, data model, security, operations, Pi setup, SSO plan |
 
 Python 3.11, FastAPI, Jinja2, SQLite. Five runtime dependencies, no ORM, no
-build step, no JavaScript framework.
+build step, no JavaScript framework. Password hashing, session tokens, CSRF
+and rate limiting are all standard library — authentication added **zero** new
+dependencies.
 
 The rule everything else follows:
 
@@ -93,21 +105,27 @@ The rule everything else follows:
 
 More in **[docs/architecture.md](docs/architecture.md)**.
 
-## Security, and what is coming
+## Security
 
-**There is no authentication yet, deliberately.** Operators type their name
-once and it is stored in a cookie; that name is recorded against every change.
-This is an accountability mechanism, not an access control — anyone on the
-network can claim to be anyone.
+The Pi has **no inbound exposure to the internet** — no port forwarding, no
+public DNS, no public IP. It is reachable from the RIT network over HTTPS,
+behind a default-deny firewall, with the app itself bound to loopback behind
+nginx. Off-campus staff come in over the RIT VPN.
 
-That is an appropriate trade for a trusted stockroom LAN, and it is why the
-service must not be exposed to the open internet as it stands.
+Everything except the public inventory page requires an account. Passwords are
+hashed with scrypt; sessions are server-side and revocable; every unsafe
+request carries a CSRF token; a strict CSP with per-request nonces means there
+is no inline JavaScript anywhere. Two tests walk the real route table and fail
+the build if any route is reachable anonymously or any `POST` accepts a
+request without a CSRF token.
 
-**Next step: RIT single sign-on** via the Shibboleth SAML IdP. All identity
-logic already lives in one function (`web/deps.py::current_actor()`), which
-already prefers Shibboleth attribute headers when present — so the integration
-is mostly configuration plus adding roles. The plan, including what to request
-from ITS: **[docs/sso-integration.md](docs/sso-integration.md)**.
+Read **[docs/security.md](docs/security.md)** before deploying it — including
+the residual risks, which are stated plainly rather than glossed over.
+
+**Still to come: RIT single sign-on** via the Shibboleth SAML IdP, which
+removes the password liability entirely. Identity already lives in one function
+(`web/deps.py::current_account()`) and roles already exist, so the work is
+mostly configuration. See **[docs/sso-integration.md](docs/sso-integration.md)**.
 
 ## License
 

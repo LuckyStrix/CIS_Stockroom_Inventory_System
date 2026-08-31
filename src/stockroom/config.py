@@ -16,6 +16,9 @@ Environment variables (all optional):
     STOCKROOM_GITHUB_PAGES_BRANCH     branch to commit to (default "main")
     STOCKROOM_BARCODE_PREFIX          default "CIS"
     STOCKROOM_PUBLISH_DEBOUNCE        seconds to coalesce republishes (default 2.0)
+    STOCKROOM_ALLOWED_HOSTS           comma-separated Host values to accept
+    STOCKROOM_SESSION_IDLE_HOURS      idle session timeout (default 8)
+    STOCKROOM_SESSION_MAX_DAYS        absolute session cap (default 7)
 """
 
 from __future__ import annotations
@@ -59,6 +62,19 @@ _gh = os.environ.get("STOCKROOM_GITHUB_PAGES_DIR")
 GITHUB_PAGES_DIR: Path | None = Path(_gh).expanduser().resolve() if _gh else None
 GITHUB_PAGES_BRANCH: str = os.environ.get("STOCKROOM_GITHUB_PAGES_BRANCH", "main")
 
+# Host header values this service will answer to. TrustedHostMiddleware
+# rejects anything else, so a forged Host cannot be reflected back into a link.
+# The default covers a Pi named `cis-stockroom` reached by name, by mDNS or
+# over loopback; set the variable for anything else.
+ALLOWED_HOSTS: list[str] = [
+    h.strip()
+    for h in os.environ.get(
+        "STOCKROOM_ALLOWED_HOSTS",
+        "cis-stockroom,cis-stockroom.local,localhost,127.0.0.1,testserver",
+    ).split(",")
+    if h.strip()
+]
+
 BARCODE_PREFIX: str = os.environ.get("STOCKROOM_BARCODE_PREFIX", "CIS")
 BARCODE_DIGITS: int = 6  # CIS-000142
 
@@ -70,3 +86,8 @@ PUBLISH_DEBOUNCE_SECONDS: float = float(
 
 # Number of nightly database snapshots to keep (see deploy/stockroom-backup).
 BACKUP_KEEP: int = int(os.environ.get("STOCKROOM_BACKUP_KEEP", "30"))
+
+# Session lifetimes. Idle expiry slides forward on each request; the absolute
+# cap never does.
+SESSION_IDLE_HOURS: int = int(os.environ.get("STOCKROOM_SESSION_IDLE_HOURS", "8"))
+SESSION_MAX_DAYS: int = int(os.environ.get("STOCKROOM_SESSION_MAX_DAYS", "7"))

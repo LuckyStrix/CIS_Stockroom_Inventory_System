@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .. import barcodes, csvio, search, service
 from ..service import ConflictError, NotFound, StockroomError
-from .deps import get_conn, page, redirect, require_actor
+from .deps import get_conn, page, redirect, require_account, require_staff
 
 router = APIRouter()
 
@@ -15,6 +15,7 @@ router = APIRouter()
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     """The stockroom's home screen: scan box first, then what needs attention."""
+    require_account(request)
     conn = get_conn()
     from .. import db
 
@@ -38,6 +39,7 @@ def scan(request: Request, code: str = ""):
     is what the dashboard's search box submits to. An exact, unambiguous
     match jumps straight to the item -- that is the whole point of scanning.
     """
+    require_account(request)
     conn = get_conn()
     item = search.resolve_scan(conn, code)
     if item is not None:
@@ -47,6 +49,7 @@ def scan(request: Request, code: str = ""):
 
 @router.get("/items", response_class=HTMLResponse)
 def list_items(request: Request, q: str = "", unit: str = "", filter: str = ""):
+    require_account(request)
     conn = get_conn()
     if q.strip():
         items = search.search_items(conn, q, include_archived=(filter == "archived"))
@@ -83,7 +86,7 @@ def list_items(request: Request, q: str = "", unit: str = "", filter: str = ""):
 
 @router.get("/items/new", response_class=HTMLResponse)
 def new_item_form(request: Request):
-    require_actor(request)
+    require_staff(request)
     return page(request, "item_form.html", item=None, units=service.list_units(get_conn()))
 
 
@@ -100,7 +103,7 @@ def create_item(
     barcode: str = Form(""),
     product_url: str = Form(""),
 ):
-    actor = require_actor(request)
+    actor = require_staff(request).as_actor()
     try:
         item = service.create_item(
             get_conn(), actor=actor, name=name, description=description,
@@ -115,6 +118,7 @@ def create_item(
 
 @router.get("/items/{item_id}", response_class=HTMLResponse)
 def item_detail(request: Request, item_id: int):
+    require_account(request)
     conn = get_conn()
     from .. import db
 
@@ -135,7 +139,7 @@ def item_detail(request: Request, item_id: int):
 
 @router.get("/items/{item_id}/edit", response_class=HTMLResponse)
 def edit_item_form(request: Request, item_id: int):
-    require_actor(request)
+    require_staff(request)
     conn = get_conn()
     return page(
         request,
@@ -159,7 +163,7 @@ def edit_item(
     barcode: str = Form(""),
     product_url: str = Form(""),
 ):
-    actor = require_actor(request)
+    actor = require_staff(request).as_actor()
     try:
         service.update_item(
             get_conn(), actor=actor, item_id=item_id, name=name,
@@ -174,7 +178,7 @@ def edit_item(
 
 @router.post("/items/{item_id}/barcode")
 def assign_barcode(request: Request, item_id: int):
-    actor = require_actor(request)
+    actor = require_staff(request).as_actor()
     try:
         item = service.assign_barcode(get_conn(), actor=actor, item_id=item_id)
     except StockroomError as exc:
@@ -184,7 +188,7 @@ def assign_barcode(request: Request, item_id: int):
 
 @router.post("/items/{item_id}/archive")
 def archive_item(request: Request, item_id: int, reason: str = Form("")):
-    actor = require_actor(request)
+    actor = require_staff(request).as_actor()
     try:
         item = service.archive_item(get_conn(), actor=actor, item_id=item_id, reason=reason)
     except ConflictError as exc:
@@ -194,7 +198,7 @@ def archive_item(request: Request, item_id: int, reason: str = Form("")):
 
 @router.post("/items/{item_id}/restore")
 def restore_item(request: Request, item_id: int):
-    actor = require_actor(request)
+    actor = require_staff(request).as_actor()
     try:
         item = service.restore_item(get_conn(), actor=actor, item_id=item_id)
     except ConflictError as exc:
@@ -204,12 +208,13 @@ def restore_item(request: Request, item_id: int):
 
 @router.get("/labels", response_class=HTMLResponse)
 def labels(request: Request, ids: str = "", unit: str = ""):
-    """A printable label sheet.
+    """A printable label sheet. Staff only -- it is a bulk inventory dump.
 
     ``?ids=1,2,3`` prints specific items; with no ids it prints every item
     that has a barcode (optionally narrowed to one storage unit), which is
     the "we just set the room up, label everything" case.
     """
+    require_staff(request)
     conn = get_conn()
     if ids.strip():
         wanted = [int(part) for part in ids.replace(" ", "").split(",") if part.isdigit()]
@@ -233,8 +238,13 @@ def labels(request: Request, ids: str = "", unit: str = ""):
 
 
 @router.get("/export.csv")
-def export_csv(include_archived: bool = False):
-    """Download the whole inventory as CSV -- backup and interchange."""
+def export_csv(request: Request, include_archived: bool = False):
+    """Download the whole inventory as CSV -- backup and interchange.
+
+    Staff only. The public page already answers "what is available"; this is
+    the complete record, including locations and archived stock.
+    """
+    require_staff(request)
     body = csvio.export_csv(get_conn(), include_archived=include_archived)
     return PlainTextResponse(
         body,

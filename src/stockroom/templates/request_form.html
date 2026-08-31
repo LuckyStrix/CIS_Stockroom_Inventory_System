@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}{{ kind_label }}{% endblock %}
+{% block content %}
+<div class="narrow">
+<h1>{{ kind_label }}</h1>
+
+<form method="post" action="/requests/new/{{ kind }}">
+<input type="hidden" name="_csrf" value="{{ csrf_token }}">
+<div class="card">
+
+{% if kind == 'borrow' %}
+  <p class="lede">
+    Ask to take equipment out. Staff will review it — this does not reserve
+    the item, so it may be lent to someone else in the meantime.
+  </p>
+  <div class="field">
+    <label for="item_id">Equipment</label>
+    <select id="item_id" name="item_id" required autofocus>
+      <option value="">Choose an item…</option>
+      {% for item in items %}
+      <option value="{{ item.id }}">
+        {{ item.name }} — {{ item.available }} of {{ item.quantity }} available ({{ item.location }})
+      </option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="row">
+    <div class="field">
+      <label for="quantity">How many</label>
+      <input id="quantity" name="quantity" type="number" value="1" min="1" required>
+    </div>
+    <div class="field">
+      <label for="needed_from">Needed from</label>
+      <input id="needed_from" name="needed_from" type="date">
+    </div>
+    <div class="field">
+      <label for="needed_until">Back by</label>
+      <input id="needed_until" name="needed_until" type="date">
+    </div>
+  </div>
+  <div class="field">
+    <label for="note">What is it for?</label>
+    <textarea id="note" name="note" placeholder="e.g. senior project shoot, week of the 14th"></textarea>
+  </div>
+
+{% elif kind == 'new_item' %}
+  <p class="lede">
+    Suggest something the stockroom should own. Staff will decide whether to
+    order it.
+  </p>
+  <div class="field">
+    <label for="proposed_name">What should we get?</label>
+    <input id="proposed_name" name="proposed_name" required autofocus
+           placeholder="e.g. Second Manfrotto 055 tripod">
+  </div>
+  <div class="field">
+    <label for="proposed_description">Description</label>
+    <textarea id="proposed_description" name="proposed_description"
+              placeholder="Model, specification, anything that matters."></textarea>
+  </div>
+  <div class="row">
+    <div class="field">
+      <label for="proposed_quantity">How many</label>
+      <input id="proposed_quantity" name="proposed_quantity" type="number" value="1" min="1">
+    </div>
+    <div class="field">
+      <label for="proposed_vendor">Vendor</label>
+      <input id="proposed_vendor" name="proposed_vendor" placeholder="e.g. B&amp;H, Thorlabs">
+    </div>
+  </div>
+  <div class="field">
+    <label for="proposed_url">Product link</label>
+    <input id="proposed_url" name="proposed_url" type="url" placeholder="https://…">
+  </div>
+  <div class="field">
+    <label for="note">Why is it needed?</label>
+    <textarea id="note" name="note"
+              placeholder="e.g. the one we have is booked most weeks"></textarea>
+  </div>
+
+{% else %}
+  <p class="lede">
+    Ask for someone to be in the stockroom at a particular time, so you can
+    collect or return equipment.
+  </p>
+  <div class="row">
+    <div class="field">
+      <label for="window_start">From</label>
+      <input id="window_start" name="window_start" type="datetime-local" required autofocus>
+    </div>
+    <div class="field">
+      <label for="window_end">Until</label>
+      <input id="window_end" name="window_end" type="datetime-local" required>
+    </div>
+  </div>
+  <div class="field">
+    <label for="purpose">I need to</label>
+    <select id="purpose" name="purpose">
+      <option value="borrow">Borrow something</option>
+      <option value="return">Return something</option>
+      <option value="both" selected>Both</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="note">Anything else?</label>
+    <textarea id="note" name="note"
+              placeholder="e.g. returning the R5 and the two SD cards"></textarea>
+  </div>
+{% endif %}
+
+</div>
+<div class="actions">
+  <button class="btn">Submit request</button>
+  <a class="btn secondary" href="/requests/mine">Cancel</a>
+</div>
+</form>
+</div>
+{% endblock %}

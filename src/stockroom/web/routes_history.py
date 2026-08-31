@@ -8,7 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from .. import service
-from .deps import get_conn, page
+from .deps import get_conn, page, require_staff
 
 router = APIRouter()
 
@@ -24,6 +24,8 @@ def history(
     actor: str = "",
     offset: int = 0,
 ):
+    # The audit log records who did what: staff only.
+    require_staff(request)
     conn = get_conn()
     offset = max(0, offset)
 

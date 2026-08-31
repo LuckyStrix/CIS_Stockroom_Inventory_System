@@ -10,6 +10,21 @@
   <button class="btn">Find</button>
 </form>
 
+{% if not account.is_staff %}
+<div class="card">
+  <h2>Need something?</h2>
+  <p class="lede">
+    Browse the inventory above, then ask the stockroom for what you need.
+  </p>
+  <div class="actions">
+    <a class="btn" href="/requests/new/borrow">Borrow equipment</a>
+    <a class="btn secondary" href="/requests/new/new_item">Suggest an item</a>
+    <a class="btn secondary" href="/requests/new/open_hours">Ask us to open</a>
+    <a class="btn secondary" href="/requests/mine">My requests</a>
+  </div>
+</div>
+{% endif %}
+
 <div class="stats">
   <a class="stat" href="/items"><b>{{ summary.item_count }}</b><span>Item types</span></a>
   <a class="stat" href="/items"><b>{{ summary.units_available }}</b><span>Available</span></a>
@@ -21,7 +36,7 @@
   <a class="stat" href="/history"><b>{{ summary.event_count }}</b><span>Logged changes</span></a>
 </div>
 
-{% if overdue %}
+{% if overdue and account.is_staff %}
 <h2>Overdue</h2>
 <div class="tablewrap"><table>
   <thead><tr><th>Item</th><th>Borrower</th><th class="num">Qty</th><th>Out since</th><th>Due</th><th></th></tr></thead>
@@ -37,6 +52,7 @@
 </table></div>
 {% endif %}
 
+{% if account.is_staff %}
 <h2>Currently checked out{% if open_loans %} ({{ summary.open_loan_count }}){% endif %}</h2>
 {% if open_loans %}
 <div class="tablewrap"><table>
@@ -50,6 +66,9 @@
 <div class="tablewrap"><div class="empty">Nothing is checked out right now.</div></div>
 {% endif %}
 
+{% endif %}
+
+{% if account.is_staff %}
 <h2>Recent activity</h2>
 <div class="card">
   <ul class="timeline">
@@ -62,7 +81,8 @@
     <li class="muted">Nothing has happened yet.</li>
     {% endfor %}
   </ul>
-  <p style="margin-bottom:0"><a href="/history">Full history →</a></p>
+  <p class="flush"><a href="/history">Full history →</a></p>
 </div>
+{% endif %}
 
 {% endblock %}

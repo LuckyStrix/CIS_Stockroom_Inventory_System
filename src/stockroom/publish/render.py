@@ -22,6 +22,7 @@ from markupsafe import Markup
 
 from .. import config, db
 from ..models import Item
+from ..requests_service import list_open_hours
 from ..service import list_items, list_loans, summary
 
 _TEMPLATE_DIR = __import__("pathlib").Path(__file__).resolve().parent.parent / "templates"
@@ -62,6 +63,18 @@ def build_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "summary": summary(conn),
         "items": [_item_payload(i) for i in items],
     }
+
+    # Confirmed staffed windows. This is the payoff of the open-hours request
+    # flow: "when can I actually come and collect this?" is answered without
+    # anybody logging in.
+    payload["open_hours"] = [
+        {
+            "start": slot.window_start,
+            "end": slot.window_end,
+            "note": slot.note,
+        }
+        for slot in list_open_hours(conn, upcoming_only=True, limit=10)
+    ]
 
     if config.PUBLIC_SHOW_BORROWERS:
         # Opt-in only. See config.PUBLIC_SHOW_BORROWERS for the reasoning.
@@ -105,6 +118,31 @@ def render_json(conn: sqlite3.Connection) -> str:
     return json.dumps(build_payload(conn), indent=2, sort_keys=True) + "\n"
 
 
+def _csp_hashes(html: str) -> list[str]:
+    """SHA-256 hashes of every inline <script> and <style> block in the page.
+
+    The public page is a single self-contained file that may be opened from
+    disk or served by GitHub Pages, so there is no server to mint a per-request
+    nonce. Hashes are the alternative the CSP spec provides for exactly this
+    case: the policy names the scripts allowed to run, and anything injected
+    later -- an item description that escaped, a tampered copy of the file --
+    does not match and does not execute.
+    """
+    import base64
+    import hashlib
+    import re
+
+    hashes = []
+    for pattern in (
+        r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>",
+        r"<style[^>]*>(.*?)</style>",
+    ):
+        for block in re.findall(pattern, html, re.S):
+            digest = hashlib.sha256(block.encode("utf-8")).digest()
+            hashes.append(f"'sha256-{base64.b64encode(digest).decode()}'")
+    return hashes
+
+
 def render_site(conn: sqlite3.Connection) -> dict[str, str]:
     """Render every public file. Returns ``{filename: contents}``.
 
@@ -118,7 +156,32 @@ def render_site(conn: sqlite3.Connection) -> dict[str, str]:
         generated_at=payload["generated_at"],
         summary=payload["summary"],
         show_borrowers=config.PUBLIC_SHOW_BORROWERS,
+        open_hours=payload["open_hours"],
         data_json=Markup(_json_for_script(payload["items"])),
+        csp="",
+    )
+
+    # Two passes: the policy has to name the hashes of the very blocks the
+    # first pass produced, so render once to obtain them and once to embed them.
+    hashes = _csp_hashes(html)
+    policy = "; ".join([
+        "default-src 'none'",
+        f"script-src {' '.join(h for h in hashes if h)}",
+        f"style-src {' '.join(hashes)}",
+        "img-src 'self' data:",
+        "connect-src 'self'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    ])
+    html = template.render(
+        org=payload["organization"],
+        generated_at=payload["generated_at"],
+        summary=payload["summary"],
+        show_borrowers=config.PUBLIC_SHOW_BORROWERS,
+        open_hours=payload["open_hours"],
+        data_json=Markup(_json_for_script(payload["items"])),
+        csp=policy,
     )
     return {
         "index.html": html,

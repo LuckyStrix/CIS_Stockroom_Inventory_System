@@ -778,7 +778,7 @@ def checkout(
         if quantity > item.available:
             raise ConflictError(
                 f"Only {item.available} of {item.quantity} "
-                f"{'unit' if item.available == 1 else 'units'} of {item.name} "
+                f"{'unit' if item.quantity == 1 else 'units'} of {item.name} "
                 f"{'is' if item.available == 1 else 'are'} available; "
                 f"{quantity} requested."
             )

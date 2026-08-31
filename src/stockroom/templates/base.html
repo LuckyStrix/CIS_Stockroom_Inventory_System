@@ -5,26 +5,40 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Stockroom{% endblock %} · CIS Stockroom</title>
 <link rel="stylesheet" href="/static/app.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>📦</text></svg>">
+<link rel="icon" href="/static/favicon.svg">
 </head>
 <body>
 <div class="topbar"><div class="inner">
   <a class="brand" href="/">CIS <span>Stockroom</span></a>
+  {% if account %}
   <nav>
     <a href="/" {% if path == '/' %}class="active"{% endif %}>Dashboard</a>
     <a href="/items" {% if path.startswith('/items') %}class="active"{% endif %}>Items</a>
-    <a href="/loans" {% if path.startswith('/loans') %}class="active"{% endif %}>Checked out</a>
-    <a href="/people" {% if path.startswith('/people') %}class="active"{% endif %}>People</a>
-    <a href="/history" {% if path.startswith('/history') %}class="active"{% endif %}>History</a>
+    {% if account.is_staff %}
+      <a href="/loans" {% if path.startswith('/loans') %}class="active"{% endif %}>Checked out</a>
+      <a href="/requests" {% if path == '/requests' %}class="active"{% endif %}>
+        Requests{% if pending_requests %} <span class="badge">{{ pending_requests }}</span>{% endif %}</a>
+      <a href="/accounts" {% if path.startswith('/accounts') %}class="active"{% endif %}>
+        Accounts{% if pending_accounts %} <span class="badge">{{ pending_accounts }}</span>{% endif %}</a>
+      <a href="/people" {% if path.startswith('/people') %}class="active"{% endif %}>People</a>
+      <a href="/history" {% if path.startswith('/history') %}class="active"{% endif %}>History</a>
+    {% else %}
+      <a href="/requests/mine" {% if path.startswith('/requests') %}class="active"{% endif %}>My requests</a>
+    {% endif %}
     <a href="/public/" target="_blank" rel="noopener">Public page ↗</a>
   </nav>
   <div class="who">
-    {% if actor %}
-      {{ actor.name }} · <a href="/whoami?next={{ path }}">change</a>
-    {% else %}
-      <a href="/whoami?next={{ path }}">Sign in</a>
-    {% endif %}
+    <a href="/account">{{ account.first_name }}</a>
+    {% if account.role != 'requester' %}<span class="pill grey tiny">{{ account.role }}</span>{% endif %}
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="linkbutton">Sign out</button>
+    </form>
   </div>
+  {% else %}
+  <nav><a href="/public/" target="_blank" rel="noopener">Public inventory ↗</a></nav>
+  <div class="who"><a href="/login">Sign in</a></div>
+  {% endif %}
 </div></div>
 
 <main>
@@ -33,5 +47,18 @@
   {% block content %}{% endblock %}
 </main>
 {% block scripts %}{% endblock %}
+
+{# The only script in the app. It replaces the inline onsubmit="confirm(...)"
+   handlers that a strict CSP forbids: any form carrying data-confirm asks
+   before it submits. Carries the per-request nonce, so nothing injected into
+   the page can execute alongside it. #}
+<script nonce="{{ csp_nonce }}">
+  document.addEventListener("submit", function (event) {
+    var message = event.target.getAttribute("data-confirm");
+    if (message && !window.confirm(message)) {
+      event.preventDefault();
+    }
+  });
+</script>
 </body>
 </html>

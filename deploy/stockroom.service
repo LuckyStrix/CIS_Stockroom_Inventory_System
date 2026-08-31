@@ -11,11 +11,13 @@ Group=stockroom
 WorkingDirectory=/opt/stockroom
 EnvironmentFile=/etc/stockroom.env
 
-# --host 0.0.0.0 so the rest of the stockroom LAN can reach it. There is no
-# authentication (see docs/sso-integration.md); keep this off the open
-# internet until the Shibboleth work is done.
+# Bound to loopback ONLY. nginx is the single thing that can reach the app,
+# which is what makes it safe for the app to trust X-Forwarded-Proto and
+# X-Forwarded-For -- no client can set those headers directly.
+# --proxy-headers is what tells uvicorn to read them.
 ExecStart=/opt/stockroom/.venv/bin/uvicorn stockroom.web.app:app \
-    --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers
+    --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers \
+    --forwarded-allow-ips 127.0.0.1
 
 # One worker on purpose. SQLite handles concurrent readers well but a single
 # writer; one process keeps the publish debounce and the write path simple,
@@ -26,11 +28,31 @@ RestartSec=3
 KillSignal=SIGINT
 TimeoutStopSec=20
 
-# The service only ever needs to write its own data directory.
+# The service only ever needs to write its own data directory. Everything
+# below is defence in depth: if the application is ever compromised, this is
+# what stops it becoming a foothold on the rest of the machine.
 NoNewPrivileges=yes
 PrivateTmp=yes
+PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# Only local and IP sockets; no raw packets, no exotic families.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
 ReadWritePaths=/var/lib/stockroom
 StateDirectory=stockroom
 

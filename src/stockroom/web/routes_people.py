@@ -7,13 +7,15 @@ from fastapi.responses import HTMLResponse
 
 from .. import db, service
 from ..service import StockroomError
-from .deps import get_conn, page, redirect, require_actor
+from .deps import get_conn, page, redirect, require_staff
 
 router = APIRouter()
 
 
 @router.get("/people", response_class=HTMLResponse)
 def list_people(request: Request):
+    # The directory carries names, emails and borrowing history: staff only.
+    require_staff(request)
     conn = get_conn()
     open_loans = service.list_loans(conn, open_only=True)
 
@@ -39,7 +41,7 @@ def list_people(request: Request):
 
 @router.post("/people")
 def create_person(request: Request, name: str = Form(...), email: str = Form(...)):
-    actor = require_actor(request)
+    actor = require_staff(request).as_actor()
     try:
         person = service.create_person(get_conn(), actor=actor, name=name, email=email)
     except StockroomError as exc:
@@ -49,6 +51,7 @@ def create_person(request: Request, name: str = Form(...), email: str = Form(...
 
 @router.get("/people/{person_id}", response_class=HTMLResponse)
 def person_detail(request: Request, person_id: int):
+    require_staff(request)
     conn = get_conn()
     loans = service.list_loans(conn, person_id=person_id)
     open_loans = [l for l in loans if l.is_open]

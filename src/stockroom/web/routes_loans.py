@@ -7,13 +7,16 @@ from fastapi.responses import HTMLResponse
 
 from .. import db, service
 from ..service import StockroomError
-from .deps import get_conn, page, redirect, require_actor
+from .deps import get_conn, page, redirect, require_staff
 
 router = APIRouter()
 
 
 @router.get("/loans", response_class=HTMLResponse)
 def list_loans(request: Request, filter: str = ""):
+    # Staff-only: this page lists who is holding what, across everyone. A
+    # requester sees their own loans on /account instead.
+    require_staff(request)
     conn = get_conn()
     return page(
         request,
@@ -44,7 +47,7 @@ def checkout(
     People page mid-checkout. If they are new and no name was typed, the
     local part of the email stands in until someone corrects it.
     """
-    actor = require_actor(request)
+    actor = require_staff(request).as_actor()
     conn = get_conn()
 
     existing = service.find_person_by_email(conn, person_email)
@@ -78,7 +81,7 @@ def return_loan(
     next: str = Form("/loans"),
 ):
     """Return all or part of a loan; ``next`` sends the user back where they were."""
-    actor = require_actor(request)
+    actor = require_staff(request).as_actor()
     try:
         loan = service.return_loan(
             get_conn(), actor=actor, loan_id=loan_id,

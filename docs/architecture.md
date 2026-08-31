@@ -2,9 +2,14 @@
 
 ## The one rule
 
-> **Every mutation goes through `service.py`, which writes the change and its
-> audit-log row in the same transaction. Nothing else writes to `item`,
-> `loan` or `person`.**
+> **Every mutation goes through a service module, which writes the change and
+> its audit-log row in the same transaction. Nothing else writes to the
+> tables.**
+
+There are three service modules, following one rule between them:
+`service.py` (inventory), `accounts.py` (accounts and sessions) and
+`requests_service.py` (the request workflows). They are separate files only
+because `service.py` already owns a lot; the guarantee is identical.
 
 This is the design decision the rest of the system is arranged around. Because
 the change and its `event` row commit together:
@@ -22,13 +27,14 @@ someone remembering it.
 ```
                     ┌──────────────┐   ┌──────────┐
       browser ─────>│  web/ (HTTP) │   │  cli.py  │<──── terminal, cron
-                    └──────┬───────┘   └────┬─────┘
-                           │                │
+                    │  auth + CSRF │   └────┬─────┘
+                    └──────┬───────┘        │
                            └───────┬────────┘
                                    v
-                        ┌──────────────────────┐
-                        │      service.py      │  invariants + audit log
-                        └──────────┬───────────┘
+              ┌────────────────────────────────────────┐
+              │  service.py · accounts.py              │  invariants
+              │  requests_service.py                   │  + audit log
+              └──────────┬─────────────────────────────┘
                                    │
                     ┌──────────────┼───────────────┐
                     v              v               v
@@ -46,7 +52,10 @@ someone remembering it.
 | `db.py` | Connections, WAL pragmas, schema init, `transaction()`, backups |
 | `schema.sql` | Tables, views, indexes. `schema_fts.sql` adds the search index |
 | `models.py` | Typed dataclasses over rows; no behaviour, no DB handle |
-| `service.py` | **All mutations.** Invariants, validation, the audit log |
+| `service.py` | Inventory mutations. Invariants, validation, the audit log |
+| `accounts.py` | Accounts, passwords, sessions, lockout |
+| `requests_service.py` | The three request workflows and open hours |
+| `security.py` | scrypt hashing, tokens, CSRF, rate limiting (all stdlib) |
 | `search.py` | FTS5 search with a LIKE fallback; barcode scan resolution |
 | `barcodes.py` | Code128 SVG rendering for printable labels |
 | `csvio.py` | Bulk import (dry-run by default) and export |
@@ -109,14 +118,31 @@ that payload silently produces a page that renders an empty table. See
 
 ### Identity is one function
 
-`web/deps.py::current_actor()` decides who is acting. It already prefers
-Shibboleth headers over the cookie, so the SSO work is mostly configuration.
-See [sso-integration.md](sso-integration.md).
+`web/deps.py::current_account()` decides who is acting; everything downstream
+takes an `Account` and never asks where it came from. That is what keeps the
+SSO change small. See [sso-integration.md](sso-integration.md).
+
+### Authorisation fails closed
+
+Middleware rejects any route not on an explicit public list, rather than each
+route opting in. A route added without a guard is therefore inaccessible, not
+exposed — and a test enumerates the real route table to prove it stays that
+way. The same test approach covers CSRF on every `POST`.
+
+### Requests never bypass the inventory rules
+
+Approving a borrow request grants permission; it does not move equipment and
+does not reserve stock. The loan is created by a separate, deliberate step
+that calls `service.checkout()` — the same code the counter uses — so
+availability limits, the concurrency guard and the audit trail all apply
+unchanged. Availability describes the shelf, never intentions about it.
 
 ## Deliberate non-goals
 
-- **Security hardening.** No authentication, no CSRF tokens, no rate limits.
-  This is a trusted-LAN tool, by explicit choice, until SSO lands.
+- **Internet exposure.** The Pi accepts nothing from outside RIT. See
+  [security.md](security.md).
+- **Email.** No mail server means no self-service password reset and no
+  notifications; staff work an inbox instead.
 - **An ORM.** Hand-written SQL in one module keeps the dependency footprint
   small on a Pi and makes the audit discipline reviewable.
 - **Multi-process scale.** One uvicorn worker. SQLite takes one writer, and

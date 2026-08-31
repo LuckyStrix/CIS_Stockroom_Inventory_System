@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Requests{% endblock %}
+{% block content %}
+
+<h1>Requests</h1>
+<p class="lede">Everything waiting on a decision, newest first.</p>
+
+{% if pending_account_list %}
+<div class="card attention">
+  <h2>Accounts awaiting approval ({{ pending_account_list|length }})</h2>
+  <table class="plain">
+    <tbody>
+      {% for a in pending_account_list %}
+      <tr>
+        <td><strong>{{ a.name }}</strong> <span class="mono muted">{{ a.email }}</span></td>
+        <td class="nowrap">
+          <div class="actions">
+            <form method="post" action="/accounts/{{ a.id }}/approve" class="inline">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <button class="btn small">Approve</button>
+            </form>
+            <form method="post" action="/accounts/{{ a.id }}/status" class="inline">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="status" value="disabled">
+              <button class="btn small secondary">Decline</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="filters">
+  {% for key, label in [('', 'All'), ('pending', 'Pending'), ('approved', 'Approved'), ('fulfilled', 'Done'), ('declined', 'Declined')] %}
+    <a class="chip {% if status_filter == key %}on{% endif %}"
+       href="/requests{% if key %}?status={{ key }}{% endif %}">{{ label }}</a>
+  {% endfor %}
+  <span class="spacer"></span>
+  {% for key, label in kinds.items() %}
+    <a class="chip {% if kind_filter == key %}on{% endif %}"
+       href="/requests?kind={{ key }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div class="tablewrap">
+{% if requests %}
+<table>
+  <thead><tr><th>#</th><th>Type</th><th>What</th><th>Who</th><th>Status</th><th>Filed</th></tr></thead>
+  <tbody>
+    {% for r in requests %}
+    <tr>
+      <td><a href="/requests/{{ r.id }}">{{ r.id }}</a></td>
+      <td class="nowrap">{{ r.kind_label }}</td>
+      <td><a href="/requests/{{ r.id }}"><strong>{{ r.title }}</strong></a>
+        {% if r.requester_note %}<div class="muted small">{{ r.requester_note|truncate(70) }}</div>{% endif %}</td>
+      <td>{{ r.requester_name }}<div class="mono muted small">{{ r.requester_email }}</div></td>
+      <td><span class="pill {{ r.status|status_class }}">{{ r.status }}</span></td>
+      <td class="nowrap muted">{{ r.created_at|datetime }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}<div class="empty">Nothing here.</div>{% endif %}
+</div>
+
+<h2>Stockroom open hours</h2>
+<div class="grid two">
+  <div class="card">
+    <h3>Upcoming</h3>
+    <table class="plain">
+      <tbody>
+        {% for slot in open_hours %}
+        <tr>
+          <td>
+            <strong>{{ slot.window_start|datetime }}</strong>
+            <div class="muted small">until {{ slot.window_end|datetime }}
+              {% if slot.note %} · {{ slot.note|truncate(50) }}{% endif %}</div>
+          </td>
+          <td class="nowrap">
+            <form method="post" action="/open-hours/{{ slot.id }}/cancel" class="inline">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <button class="btn small secondary">Cancel</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td class="muted">No open hours published. The public page will say so.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3>Publish a window</h3>
+    <form method="post" action="/open-hours">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="row">
+        <div class="field">
+          <label for="oh_start">From</label>
+          <input id="oh_start" name="window_start" type="datetime-local" required>
+        </div>
+        <div class="field">
+          <label for="oh_end">Until</label>
+          <input id="oh_end" name="window_end" type="datetime-local" required>
+        </div>
+      </div>
+      <div class="field">
+        <label for="oh_note">Note</label>
+        <input id="oh_note" name="note" placeholder="e.g. returns only">
+      </div>
+      <button class="btn">Publish</button>
+      <div class="hint">Appears on the public page immediately.</div>
+    </form>
+  </div>
+</div>
+{% endblock %}

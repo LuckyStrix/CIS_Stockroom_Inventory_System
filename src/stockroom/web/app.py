@@ -1,48 +1,64 @@
 """The FastAPI application.
 
-Run it with::
+Run behind nginx, which terminates TLS::
 
-    uvicorn stockroom.web.app:app --host 0.0.0.0 --port 8000
+    uvicorn stockroom.web.app:app --host 127.0.0.1 --port 8000 --proxy-headers
 
-or, in production, via the systemd unit in ``deploy/stockroom.service``.
+Binding to loopback is not incidental. The app is never directly reachable
+from the network: nginx is the only thing that can talk to it, which is what
+makes it safe to trust `X-Forwarded-Proto` and `X-Forwarded-For` in deps.py.
 
-Composition, in order:
+Security posture, in one place:
 
-* the database is created/upgraded at startup, so a fresh Pi needs no
-  manual init step;
-* the publish worker is installed, so every committed change rebuilds the
-  public page in the background;
-* ``/public`` serves that generated page, and ``/static`` the UI's CSS;
-* the route modules are mounted.
+* **Authentication** -- server-side sessions; every route except a short
+  explicit list requires one (`deps.PUBLIC_PATHS`).
+* **CSRF** -- a synchroniser token is required on every unsafe method,
+  enforced by middleware rather than per route, so a new POST cannot forget it.
+* **CSP** -- a per-request nonce; no inline handlers anywhere in the templates.
+* **No open redirects** -- every caller-supplied destination goes through
+  `deps.safe_path`.
 
-There is no authentication. That is deliberate for this phase -- the service
-is bound to the stockroom LAN and identity is self-declared for the audit log
-(see ``web/deps.py`` and ``docs/sso-integration.md``).
+What this deliberately is *not*: internet-facing. See docs/security.md.
 """
 
 from __future__ import annotations
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import (
-    FileResponse,
-    HTMLResponse,
-    JSONResponse,
-    RedirectResponse,
-)
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .. import __version__, config, db, service
+from .. import __version__, accounts, config, db, service
 from ..publish import worker as publish_worker
-from ..service import Actor, NotFound, StockroomError
-from . import routes_history, routes_items, routes_loans, routes_people
-from .deps import _IdentifyRedirect, page, redirect, set_actor_cookie, templates
+from ..service import NotFound, StockroomError
+from . import (
+    routes_accounts,
+    routes_auth,
+    routes_history,
+    routes_items,
+    routes_loans,
+    routes_people,
+    routes_requests,
+)
+from .deps import (
+    CSRFError,
+    Forbidden,
+    _LoginRedirect,
+    is_public_path,
+    redirect,
+    safe_path,
+    set_csrf_cookie,
+    templates,
+    verify_csrf,
+)
 
 log = logging.getLogger("stockroom")
 
@@ -58,12 +74,16 @@ async def lifespan(app: FastAPI):
     config.PUBLISH_DIR.mkdir(parents=True, exist_ok=True)
 
     worker = publish_worker.install(db_path=config.DB_PATH)
-    # Render once at boot so /public is never a 404 on a fresh install, and
-    # so a page edited or deleted by hand is restored on restart.
     try:
         worker.publish()
     except Exception:
         log.exception("initial publish failed (continuing)")
+
+    if not accounts.list_accounts(db.connect(), role="admin"):
+        log.warning(
+            "No administrator account exists. Create one with: "
+            "stockroom user create --admin"
+        )
 
     log.info("stockroom %s ready · db=%s · publish=%s",
              __version__, config.DB_PATH, config.PUBLISH_DIR)
@@ -78,17 +98,146 @@ app = FastAPI(
     docs_url="/api/docs",
 )
 
+# Reject requests carrying an unexpected Host header. Without this, a request
+# with a forged Host can poison absolute URLs and password-reset style links.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.ALLOWED_HOSTS)
+
 
 # ---------------------------------------------------------------------------
-# template filters
+# middleware
+# ---------------------------------------------------------------------------
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    """CSRF enforcement, a CSP nonce, and security headers, for every request.
+
+    Doing CSRF here rather than as a per-route dependency is the point: this
+    cannot be forgotten when someone adds a route, and `tests/test_security.py`
+    walks every POST in the application to prove it.
+    """
+    request.state.csp_nonce = secrets.token_urlsafe(16)
+
+    if request.method not in ("GET", "HEAD", "OPTIONS", "TRACE"):
+        try:
+            verify_csrf(request, await _submitted_csrf(request))
+        except CSRFError as exc:
+            response = _error_page(request, 403, "Form expired", str(exc))
+            set_csrf_cookie(response, request)
+            return response
+
+    response = await call_next(request)
+    _apply_security_headers(request, response)
+    # A page rendered for an anonymous visitor may have minted a CSRF token
+    # for its form; this is where that token actually reaches the browser.
+    set_csrf_cookie(response, request)
+    return response
+
+
+async def _submitted_csrf(request: Request) -> str:
+    """Pull the CSRF field out of the request body.
+
+    Reads the *raw* body rather than calling `request.form()`. That is not a
+    style preference: Starlette's middleware only replays the body downstream
+    when `body()` was used to read it. Calling `form()` here consumes the
+    stream without caching it, and every route below would then see an empty
+    form and fail validation. Verified by
+    `test_csrf_middleware_does_not_eat_the_request_body`.
+    """
+    body = await request.body()
+    content_type = request.headers.get("content-type", "")
+
+    if content_type.startswith("application/x-www-form-urlencoded"):
+        from urllib.parse import parse_qs
+
+        values = parse_qs(body.decode("utf-8", "replace")).get("_csrf", [])
+        return values[0] if values else ""
+
+    if content_type.startswith("multipart/form-data"):
+        # No file uploads in this application, so rather than pull in a full
+        # multipart parse, find the one field we need.
+        import re
+
+        match = re.search(
+            rb'name="_csrf"\r\n\r\n(.*?)\r\n', body, re.S
+        )
+        return match.group(1).decode("utf-8", "replace") if match else ""
+
+    return ""
+
+
+def _apply_security_headers(request: Request, response) -> None:
+    nonce = getattr(request.state, "csp_nonce", "")
+    is_html = response.headers.get("content-type", "").startswith("text/html")
+
+    if is_html:
+        # 'self' plus a nonce: no inline handlers, no third-party origins, and
+        # nothing may frame this app or rewrite its base URL.
+        response.headers["Content-Security-Policy"] = "; ".join([
+            "default-src 'self'",
+            f"script-src 'self' 'nonce-{nonce}'",
+            "style-src 'self'",
+            "img-src 'self' data:",
+            "font-src 'self'",
+            "connect-src 'self'",
+            "form-action 'self'",
+            "frame-ancestors 'none'",
+            "base-uri 'none'",
+            "object-src 'none'",
+        ])
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    )
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+
+    # Only assert HSTS when the request actually arrived over TLS -- sending it
+    # over plain HTTP is meaningless, and on a hostname that later has to serve
+    # something else it is a lasting nuisance.
+    if request.url.scheme == "https" or \
+            request.headers.get("x-forwarded-proto", "").lower() == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+
+
+@app.middleware("http")
+async def require_authentication(request: Request, call_next):
+    """Deny anonymous access to everything not explicitly public.
+
+    A deny-by-default gate, so forgetting a guard on a new route fails closed
+    rather than silently exposing it.
+    """
+    if not is_public_path(request.url.path):
+        from .deps import current_account
+
+        if current_account(request) is None:
+            if request.method == "GET":
+                target = request.url.path
+                if request.url.query:
+                    target += "?" + request.url.query
+                return RedirectResponse(f"/login?next={target}", status_code=303)
+            return _error_page(
+                request, 401, "Sign in required",
+                "Your session has expired. Sign in and try again.",
+            )
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# template filters and globals
 # ---------------------------------------------------------------------------
 def _parse(value: str | None) -> datetime | None:
     if not value:
         return None
-    try:
-        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
-    except ValueError:
-        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def fmt_datetime(value: str | None) -> str:
@@ -102,96 +251,95 @@ def fmt_date(value: str | None) -> str:
 
 
 def show(value) -> str:
-    """Render a diff value readably: None becomes an em dash, not 'None'."""
     if value is None or value == "":
         return "—"
     return str(value)
 
 
 def event_class(action: str) -> str:
-    """CSS class driving the colour of a timeline dot."""
-    if action.endswith(".create"):
+    if action.endswith(".create") or action.endswith(".register"):
         return "create"
     if action == "loan.checkout":
         return "checkout"
     if action.startswith("loan.") and "return" in action:
         return "ret"
-    if action in {"item.archive"}:
+    if action in {"item.archive", "account.disable", "request.decline"}:
         return "archive"
+    if action.startswith("auth.") or action.startswith("account."):
+        return "auth"
     return ""
+
+
+def status_class(status: str) -> str:
+    return {
+        "pending": "warn", "approved": "info", "fulfilled": "ok",
+        "declined": "out", "cancelled": "grey",
+        "active": "ok", "disabled": "out",
+    }.get(status, "grey")
 
 
 templates.env.filters["datetime"] = fmt_datetime
 templates.env.filters["date"] = fmt_date
 templates.env.filters["show"] = show
 templates.env.filters["event_class"] = event_class
+templates.env.filters["status_class"] = status_class
 
 
 # ---------------------------------------------------------------------------
 # error handling
 # ---------------------------------------------------------------------------
-@app.exception_handler(_IdentifyRedirect)
-async def _identify(request: Request, exc: _IdentifyRedirect):
-    """Anyone about to change something must first say who they are."""
-    return RedirectResponse(f"/whoami?next={exc.next}", status_code=303)
+def _error_page(request: Request, code: int, title: str, message: str):
+    """Render an error without needing a session (used before auth resolves)."""
+    return templates.TemplateResponse(
+        request, "error.html",
+        {
+            "code": code, "title": title, "message": message,
+            "account": None, "actor": None, "csrf_token": "",
+            "csp_nonce": getattr(request.state, "csp_nonce", ""),
+            "org": config.ORG_NAME, "path": request.url.path,
+            "summary": service.summary(db.connect()),
+            "pending_requests": 0, "pending_accounts": 0,
+            "ok": "", "error": "",
+        },
+        status_code=code,
+    )
+
+
+@app.exception_handler(_LoginRedirect)
+async def _needs_login(request: Request, exc: _LoginRedirect):
+    return RedirectResponse(f"/login?next={exc.next}", status_code=303)
+
+
+@app.exception_handler(Forbidden)
+async def _forbidden(request: Request, exc: Forbidden):
+    return _error_page(request, 403, "Not permitted", exc.message)
+
+
+@app.exception_handler(CSRFError)
+async def _csrf_failed(request: Request, exc: CSRFError):
+    return _error_page(request, 403, "Form expired", str(exc))
 
 
 @app.exception_handler(NotFound)
 async def _not_found(request: Request, exc: NotFound):
-    return templates.TemplateResponse(
-        request, "error.html",
-        {"code": 404, "title": "Not found", "message": str(exc),
-         "actor": None, "org": config.ORG_NAME, "path": request.url.path,
-         "summary": service.summary(db.connect()), "ok": "", "error": ""},
-        status_code=404,
-    )
+    return _error_page(request, 404, "Not found", str(exc))
 
 
 @app.exception_handler(StockroomError)
 async def _stockroom_error(request: Request, exc: StockroomError):
-    """A rejected-but-expected operation, surfaced as a message not a crash."""
-    referer = request.headers.get("referer", "/")
-    return redirect(referer, error=str(exc))
+    """An expected, rejected operation: show it as a message, not a crash.
+
+    The destination is taken from Referer, which is attacker-controlled, so it
+    goes through safe_path -- otherwise this handler is an open redirect.
+    """
+    return redirect(safe_path(request.headers.get("referer", "/")), error=str(exc))
 
 
 @app.exception_handler(StarletteHTTPException)
 async def _http_error(request: Request, exc: StarletteHTTPException):
     if request.url.path.startswith(("/api", "/static", "/public")):
         return await http_exception_handler(request, exc)
-    return templates.TemplateResponse(
-        request, "error.html",
-        {"code": exc.status_code, "title": "Something went wrong",
-         "message": exc.detail, "actor": None, "org": config.ORG_NAME,
-         "path": request.url.path, "summary": service.summary(db.connect()),
-         "ok": "", "error": ""},
-        status_code=exc.status_code,
-    )
-
-
-# ---------------------------------------------------------------------------
-# identity
-# ---------------------------------------------------------------------------
-@app.get("/whoami", response_class=HTMLResponse)
-def whoami_form(request: Request, next: str = "/"):
-    return page(request, "whoami.html", next_url=next or "/")
-
-
-@app.post("/whoami")
-def whoami_save(
-    request: Request,
-    name: str = Form(...),
-    email: str = Form(""),
-    next: str = Form("/"),
-):
-    actor = Actor(name=name.strip(), email=email.strip().lower())
-    if not actor.name:
-        return redirect("/whoami", error="Please enter a name.")
-    # Only ever redirect within this app -- never to an absolute URL supplied
-    # in the form.
-    target = next if next.startswith("/") and not next.startswith("//") else "/"
-    response = redirect(target, ok=f"Hello, {actor.name}.")
-    set_actor_cookie(response, actor)
-    return response
+    return _error_page(request, exc.status_code, "Something went wrong", str(exc.detail))
 
 
 # ---------------------------------------------------------------------------
@@ -199,43 +347,30 @@ def whoami_save(
 # ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    """Liveness probe: confirms the database answers and reports scale."""
+    """Liveness probe. Public, and deliberately says nothing sensitive."""
     conn = db.connect()
     return JSONResponse(
         {
             "status": "ok",
             "version": __version__,
-            "database": str(config.DB_PATH),
             "schema_version": db.get_meta(conn, "schema_version"),
-            **service.summary(conn),
+            "item_count": service.summary(conn)["item_count"],
         }
     )
 
 
 @app.post("/publish")
-def republish():
-    """Force an immediate rebuild of the public page."""
+def republish(request: Request):
+    from .deps import require_staff
+
+    require_staff(request)
     publish_worker.publish_now(config.DB_PATH)
     return redirect("/", ok="Public page rebuilt.")
 
 
 # ---------------------------------------------------------------------------
-# mounts
+# the generated public page
 # ---------------------------------------------------------------------------
-app.include_router(routes_items.router)
-app.include_router(routes_loans.router)
-app.include_router(routes_people.router)
-app.include_router(routes_history.router)
-
-app.mount("/static", StaticFiles(directory=str(_PACKAGE_DIR / "static")), name="static")
-
-
-# The generated public page, served by the Pi itself.
-#
-# This is a route rather than a StaticFiles mount because a mount binds its
-# directory at import time, and config.PUBLISH_DIR is resolved from the
-# environment. Reading the setting per request keeps the served directory and
-# the published directory from ever drifting apart.
 _PUBLIC_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".json": "application/json",
@@ -252,11 +387,15 @@ def public_root_redirect():
 
 @app.get("/public/{path:path}", include_in_schema=False)
 def public_page(path: str = ""):
-    """Serve the generated public site."""
+    """Serve the generated public site.
+
+    A route rather than a StaticFiles mount, because a mount binds its
+    directory at import time while config.PUBLISH_DIR comes from the
+    environment -- reading it per request keeps served and published in step.
+    """
     root = config.PUBLISH_DIR.resolve()
     target = (root / (path or "index.html")).resolve()
 
-    # Refuse anything that escapes the publish directory.
     if not target.is_relative_to(root):
         raise StarletteHTTPException(status_code=404, detail="Not found")
     if target.is_dir():
@@ -264,12 +403,24 @@ def public_page(path: str = ""):
     if not target.is_file():
         raise StarletteHTTPException(
             status_code=404,
-            detail="The public page has not been generated yet. Run `stockroom publish`.",
+            detail="The public page has not been generated yet.",
         )
-
     return FileResponse(
         target,
         media_type=_PUBLIC_TYPES.get(target.suffix, "application/octet-stream"),
-        # The page is rewritten on every change; never let a browser cache it.
         headers={"Cache-Control": "no-cache"},
     )
+
+
+# ---------------------------------------------------------------------------
+# mounts
+# ---------------------------------------------------------------------------
+app.include_router(routes_auth.router)
+app.include_router(routes_items.router)
+app.include_router(routes_loans.router)
+app.include_router(routes_people.router)
+app.include_router(routes_history.router)
+app.include_router(routes_requests.router)
+app.include_router(routes_accounts.router)
+
+app.mount("/static", StaticFiles(directory=str(_PACKAGE_DIR / "static")), name="static")

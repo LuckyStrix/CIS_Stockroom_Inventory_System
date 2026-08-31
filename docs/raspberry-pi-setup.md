@@ -76,9 +76,40 @@ When it finishes:
 
 | | |
 |---|---|
-| Staff UI | `http://cis-stockroom.local:8000/` |
-| Public page | `http://cis-stockroom.local:8000/public/` |
-| Health check | `http://cis-stockroom.local:8000/health` |
+| Staff UI | `https://cis-stockroom.local/` |
+| Public page | `https://cis-stockroom.local/public/` (also plain HTTP) |
+| Health check | `https://cis-stockroom.local/health` |
+
+Your browser will warn about the certificate — it is self-signed. That is
+expected; [security.md](security.md) covers trusting it, and why an
+ITS-issued certificate is the better answer.
+
+## 4b. Create the first administrator, and lock the Pi down
+
+Two steps the installer deliberately does not do for you.
+
+```bash
+# There is no way to make an admin over the network. This is on purpose.
+sudo -u stockroom /opt/stockroom/.venv/bin/stockroom user create \
+    --first-name Your --last-name Name --email you@rit.edu --admin
+
+# Firewall, key-only SSH, automatic security updates, fail2ban.
+# Pass YOUR campus subnet -- this is the single most valuable line of defence.
+sudo ./deploy/harden-pi.sh --subnet 129.21.0.0/16
+```
+
+`harden-pi.sh` will refuse to disable password SSH unless you already have a
+key installed, rather than locking you out of your own Pi. Run
+`ssh-copy-id user@cis-stockroom.local` first if you have not.
+
+Then verify from **another machine** — this is the check that matters:
+
+```bash
+nmap -Pn cis-stockroom.local     # expect 22, 80, 443 and nothing else
+```
+
+Everyone else signs up at `https://cis-stockroom.local/register` and waits for
+you to approve them.
 
 ## 5. Load your stock
 
@@ -107,36 +138,7 @@ Print labels for everything from `http://cis-stockroom.local:8000/labels`.
 The sheet is laid out for Avery 5160 (3 × 10, 2.625" × 1"). **Print at 100%
 scale with page scaling off** — a scaled barcode may not scan.
 
-## 7. Optional: put the public page on port 80
-
-So people can use `http://cis-stockroom.local` with no port number:
-
-```bash
-sudo apt install nginx
-sudo tee /etc/nginx/sites-available/stockroom >/dev/null <<'EOF'
-server {
-    listen 80 default_server;
-    root /var/lib/stockroom/publish;
-    index index.html;
-
-    # The public page is served straight from disk.
-    location / { try_files $uri $uri/ =404; }
-
-    # The staff UI lives under /app.
-    location /app/ {
-        proxy_pass http://127.0.0.1:8000/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-EOF
-sudo ln -sf /etc/nginx/sites-available/stockroom /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-## 8. Optional: mirror to GitHub Pages
+## 7. Optional: mirror to GitHub Pages
 
 To make the page readable from off campus, clone a Pages repo somewhere the
 service user can write and give it push credentials (a deploy key is
@@ -155,11 +157,15 @@ blocks a checkout.
 ## Checks and next steps
 
 ```bash
-systemctl status stockroom          # is it running
+systemctl status stockroom nginx    # both running?
 journalctl -u stockroom -f          # live logs
-curl -s localhost:8000/health       # JSON summary
+curl -sk https://localhost/health   # JSON summary
 systemctl list-timers stockroom\*   # nightly backup scheduled
+sudo ss -ltnp | grep 8000           # uvicorn must be on 127.0.0.1 only
 ```
 
 Day-to-day operations, backup and restore: [operations.md](operations.md).
-Real logins: [sso-integration.md](sso-integration.md).
+Accounts and the request workflows:
+[accounts-and-requests.md](accounts-and-requests.md).
+Security posture and residual risks: [security.md](security.md).
+RIT single sign-on, when you are ready: [sso-integration.md](sso-integration.md).

@@ -28,8 +28,42 @@ camera body is the same shape with `quantity = 1`.
 
 ### `person` — someone who can borrow
 
-Name plus a case-insensitively unique email. No login, no password. When SSO
-lands, `email` is the join key against the Shibboleth `mail` attribute.
+Name plus a case-insensitively unique email. **Not** a login: the stockroom
+lends to visiting researchers and collaborators who will never have an
+account, and this table is what makes that possible.
+
+### `account` — someone who can log in
+
+First name, last name, RIT email, scrypt password hash, `role`
+(`requester`/`staff`/`admin`) and `status` (`pending`/`active`/`disabled`).
+Linked to a `person` on approval, joined by email, so an account holder can be
+lent equipment immediately.
+
+Keeping the two apart is deliberate. Collapsing them would either force every
+borrower to have a password, or give every visitor a login.
+
+### `session` — a logged-in browser
+
+Server-side and revocable: the cookie carries a 256-bit random token and the
+table stores only its SHA-256. `expires_at` is an idle timeout that slides
+forward on use; `absolute_expires_at` is a hard cap that never moves.
+
+### `auth_attempt` — login attempts
+
+Drives lockout, and kept in the database rather than in memory so that
+restarting the service does not hand an attacker a fresh allowance.
+
+### `request` — the three request forms
+
+One table, one lifecycle (`pending` → `approved`/`declined`/`cancelled`,
+`approved` → `fulfilled`), with per-kind columns pinned down by a `CHECK`
+constraint. `loan_id` and `created_item_id` record what fulfilling it
+produced.
+
+### `open_hours` — confirmed staffed windows
+
+Created when staff approve an open-hours request, or published directly.
+These appear on the public page.
 
 ### `loan` — N units of an item held by a person
 

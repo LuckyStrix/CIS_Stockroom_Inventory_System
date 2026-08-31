@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Request #{{ subject.id }}{% endblock %}
+{% block content %}
+
+<h1>Request #{{ subject.id }}
+  <span class="pill {{ subject.status|status_class }}">{{ subject.status }}</span></h1>
+<p class="lede">{{ subject.kind_label }} · filed {{ subject.created_at|datetime }}
+  by {{ subject.requester_name }}</p>
+
+<div class="grid two">
+  <div class="card">
+    <h2>What was asked for</h2>
+    <dl class="kv">
+      {% if subject.kind == 'borrow' %}
+        <dt>Item</dt>
+        <dd>{% if item %}<a href="/items/{{ item.id }}">{{ item.name }}</a>
+              <div class="muted small">{{ item.available }} of {{ item.quantity }} available · {{ item.location }}</div>
+            {% else %}{{ subject.item_name }}{% endif %}</dd>
+        <dt>Quantity</dt><dd>{{ subject.quantity }}</dd>
+        <dt>Needed from</dt><dd>{{ subject.needed_from|date }}</dd>
+        <dt>Back by</dt><dd>{{ subject.needed_until|date }}</dd>
+      {% elif subject.kind == 'new_item' %}
+        <dt>Item</dt><dd><strong>{{ subject.proposed_name }}</strong></dd>
+        <dt>Description</dt><dd>{{ subject.proposed_description or "—" }}</dd>
+        <dt>Quantity</dt><dd>{{ subject.proposed_quantity }}</dd>
+        <dt>Vendor</dt><dd>{{ subject.proposed_vendor or "—" }}</dd>
+        {% if subject.proposed_url %}
+        <dt>Link</dt><dd><a href="{{ subject.proposed_url }}" rel="noopener nofollow"
+                            target="_blank">{{ subject.proposed_url|truncate(46) }}</a></dd>
+        {% endif %}
+      {% else %}
+        <dt>From</dt><dd>{{ subject.window_start|datetime }}</dd>
+        <dt>Until</dt><dd>{{ subject.window_end|datetime }}</dd>
+        <dt>Purpose</dt><dd>{{ subject.purpose }}</dd>
+      {% endif %}
+      <dt>Requester</dt>
+      <dd>{{ subject.requester_name }}<div class="mono muted small">{{ subject.requester_email }}</div></dd>
+      {% if subject.requester_note %}
+      <dt>Note</dt><dd>{{ subject.requester_note }}</dd>
+      {% endif %}
+    </dl>
+
+    {% if subject.decided_at %}
+    <hr>
+    <dl class="kv">
+      <dt>Decision</dt>
+      <dd>{{ subject.status }} by {{ subject.decided_by_name }} on {{ subject.decided_at|datetime }}</dd>
+      {% if subject.decision_note %}<dt>Reason</dt><dd>{{ subject.decision_note }}</dd>{% endif %}
+      {% if subject.loan_id %}<dt>Loan</dt><dd>#{{ subject.loan_id }}</dd>{% endif %}
+      {% if subject.created_item_id %}
+      <dt>Item added</dt><dd><a href="/items/{{ subject.created_item_id }}">#{{ subject.created_item_id }}</a></dd>
+      {% endif %}
+    </dl>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Actions</h2>
+    {% if account.is_staff and subject.status == 'pending' %}
+      <form method="post" action="/requests/{{ subject.id }}/approve">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="anote">Note (optional)</label>
+          <input id="anote" name="note" placeholder="anything the requester should know">
+        </div>
+        <button class="btn">Approve</button>
+      </form>
+      <hr>
+      <form method="post" action="/requests/{{ subject.id }}/decline">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="dnote">Reason for declining</label>
+          <input id="dnote" name="note" placeholder="e.g. already booked that week">
+        </div>
+        <button class="btn secondary">Decline</button>
+      </form>
+
+    {% elif account.is_staff and subject.can_fulfil and subject.kind == 'borrow' %}
+      <p class="lede">Approved. Check the equipment out when they collect it.</p>
+      <form method="post" action="/requests/{{ subject.id }}/fulfil">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="row">
+          <div class="field">
+            <label for="fq">Quantity</label>
+            <input id="fq" name="quantity" type="number" value="{{ subject.quantity }}" min="1">
+          </div>
+          <div class="field">
+            <label for="fd">Due back</label>
+            <input id="fd" name="due_at" type="date">
+          </div>
+        </div>
+        <button class="btn">Check out now</button>
+        <div class="hint">Creates a real loan against {{ subject.item_name }}.</div>
+      </form>
+
+    {% elif account.is_staff and subject.can_fulfil and subject.kind == 'new_item' %}
+      <p class="lede">Approved. Add it to the inventory, then link it here.</p>
+      <p><a class="btn" href="/items/new">Create the item</a></p>
+      <form method="post" action="/requests/{{ subject.id }}/fulfil-item">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="iid">Existing item id</label>
+          <input id="iid" name="item_id" type="number" required
+                 placeholder="the id of the item you just created">
+        </div>
+        <button class="btn secondary">Mark as added</button>
+      </form>
+
+    {% else %}
+      <p class="muted">
+        {% if subject.status == 'fulfilled' %}This request is complete.
+        {% elif subject.status == 'declined' %}This request was declined.
+        {% elif subject.status == 'cancelled' %}This request was withdrawn.
+        {% else %}Waiting on stockroom staff.{% endif %}
+      </p>
+    {% endif %}
+
+    {% if subject.is_open %}
+    <hr>
+    <form method="post" action="/requests/{{ subject.id }}/cancel">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ '/requests' if account.is_staff else '/requests/mine' }}">
+      <button class="btn secondary">Withdraw this request</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+<p class="mt"><a href="{{ '/requests' if account.is_staff else '/requests/mine' }}">← Back to requests</a></p>
+{% endblock %}

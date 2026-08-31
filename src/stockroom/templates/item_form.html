@@ -9,6 +9,7 @@
 </p>
 
 <form method="post" action="{{ '/items/' + item.id|string + '/edit' if item else '/items/new' }}">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <div class="card">
     <div class="field">
       <label for="name">Name</label>

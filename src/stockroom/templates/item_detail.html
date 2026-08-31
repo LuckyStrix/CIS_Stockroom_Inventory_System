@@ -3,7 +3,7 @@
 {% block title %}{{ item.name }}{% endblock %}
 {% block content %}
 
-<div style="display:flex;justify-content:space-between;align-items:start;gap:12px;flex-wrap:wrap">
+<div class="headrow">
   <div>
     <h1>{{ item.name }} {{ status_pill(item) }}</h1>
     <p class="lede">{{ item.description or "No description." }}</p>
@@ -26,7 +26,8 @@
       <dd>
         {% if item.barcode %}<span class="mono">{{ item.barcode }}</span>
         {% else %}
-          <form method="post" action="/items/{{ item.id }}/barcode" style="display:inline">
+          <form method="post" action="/items/{{ item.id }}/barcode" class="inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <button class="btn small secondary">Assign a barcode</button>
           </form>
         {% endif %}
@@ -42,16 +43,18 @@
     </dl>
 
     {% if item.barcode %}
-    <div class="barcode-cell" style="margin-top:16px">{{ barcode_svg|safe }}</div>
+    <div class="barcode-cell" class="mt">{{ barcode_svg|safe }}</div>
     {% endif %}
 
-    <div class="actions" style="margin-top:16px">
+    <div class="actions" class="mt">
       {% if item.is_archived %}
         <form method="post" action="/items/{{ item.id }}/restore">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <button class="btn secondary">Restore from archive</button></form>
       {% else %}
         <form method="post" action="/items/{{ item.id }}/archive"
-              onsubmit="return confirm('Archive {{ item.name }}? It stays in the history and can be restored.')">
+              data-confirm="Archive {{ item.name }}? It stays in the history and can be restored.">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <button class="btn secondary">Archive</button></form>
       {% endif %}
     </div>
@@ -65,6 +68,7 @@
       <p class="muted">All {{ item.quantity }} unit(s) are currently checked out.</p>
     {% else %}
     <form method="post" action="/items/{{ item.id }}/checkout">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <div class="field">
         <label for="person">Borrower</label>
         <input id="person" name="person_email" list="people" required

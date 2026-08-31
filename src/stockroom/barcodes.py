@@ -32,6 +32,13 @@ _WRITER_OPTIONS = {
 
 _SVG_TAG = re.compile(r"<svg\b[^>]*>", re.IGNORECASE)
 
+# python-barcode paints its bars with style="fill:black;". A strict CSP
+# without 'unsafe-inline' blocks inline style attributes, which would leave
+# every barcode on the page unpainted -- and silently, since nothing errors.
+# Presentation attributes carry the same meaning and are not style, so they
+# survive the policy. Covered by test_the_page_carries_no_inline_handlers.
+_STYLE_FILL = re.compile(r'\sstyle="fill:\s*([#\w]+)\s*;?\s*"', re.IGNORECASE)
+
 
 def render_svg(code: str) -> str:
     """Return an inline ``<svg>`` element encoding ``code`` as Code128.
@@ -57,9 +64,10 @@ def render_svg(code: str) -> str:
         return ""
     svg = svg[start:]
 
-    return _SVG_TAG.sub(
+    svg = _SVG_TAG.sub(
         lambda m: m.group(0).replace("<svg", '<svg class="barcode"', 1), svg, count=1
     )
+    return _STYLE_FILL.sub(r' fill="\1"', svg)
 
 
 def is_valid(code: str) -> bool:

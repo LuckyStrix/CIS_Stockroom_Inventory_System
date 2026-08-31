@@ -18,7 +18,7 @@
   <tr>
     <td>
       <a href="/items/{{ item.id }}"><strong>{{ item.name }}</strong></a>
-      {% if item.description %}<div class="muted" style="font-size:.85rem">{{ item.description|truncate(90) }}</div>{% endif %}
+      {% if item.description %}<div class="muted small">{{ item.description|truncate(90) }}</div>{% endif %}
       {% if item.barcode %}<div class="mono muted">{{ item.barcode }}</div>{% endif %}
     </td>
     <td class="nowrap">{{ item.location }}</td>
@@ -34,7 +34,7 @@
   <tr>
     {% if show_item %}
     <td><a href="/items/{{ loan.item_id }}">{{ loan.item_name }}</a>
-      <div class="muted" style="font-size:.85rem">{{ loan.item_unit }} / {{ loan.item_shelf }}</div></td>
+      <div class="muted small">{{ loan.item_unit }} / {{ loan.item_shelf }}</div></td>
     {% endif %}
     <td><a href="/people/{{ loan.person_id }}">{{ loan.person_name }}</a>
       <div class="muted mono">{{ loan.person_email }}</div></td>
@@ -48,10 +48,11 @@
     </td>
     <td class="nowrap">
       <form method="post" action="/loans/{{ loan.id }}/return" class="actions">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="next" value="{{ next_url }}">
         {% if loan.quantity > 1 %}
           <input type="number" name="quantity" value="{{ loan.quantity }}" min="1"
-                 max="{{ loan.quantity }}" style="width:72px" aria-label="Quantity to return">
+                 max="{{ loan.quantity }}" class="qty" aria-label="Quantity to return">
         {% endif %}
         <button class="btn small">Return</button>
       </form>

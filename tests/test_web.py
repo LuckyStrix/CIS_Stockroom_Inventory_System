@@ -1,7 +1,9 @@
-"""The web UI, driven through real HTTP requests.
+"""The inventory web UI, driven through real HTTP as a signed-in staff member.
 
-These go through the actual routes, forms and templates -- if a template
-references a variable a route does not pass, these fail.
+These exercise the actual routes, forms and templates, so a template that
+references a variable its route does not pass fails here rather than in the
+stockroom. Authentication and authorisation have their own file
+(`test_authz.py`); this one is about the inventory workflows.
 """
 
 import re
@@ -9,39 +11,71 @@ import re
 import pytest
 from fastapi.testclient import TestClient
 
-from stockroom import service
+from stockroom import accounts, service
+from stockroom.service import Actor
+
+SETUP = Actor("cli:test")
+STAFF_PASSWORD = "glass onion tuesday lamp"
 
 
 @pytest.fixture
 def client(temp_env):
+    """A signed-in staff session."""
     from stockroom.web.app import app
 
     with TestClient(app) as test_client:
-        # The "who are you?" cookie every operator sets on first use.
-        test_client.cookies.set("stockroom_operator", "Test Operator|operator@rit.edu")
+        from stockroom import db
+
+        accounts.register(
+            db.connect(), first_name="Test", last_name="Operator",
+            email="operator@rit.edu", password=STAFF_PASSWORD,
+            role="staff", status="active", actor=SETUP,
+        )
+        token = csrf(test_client, "/login")
+        response = test_client.post(
+            "/login",
+            data={"email": "operator@rit.edu", "password": STAFF_PASSWORD,
+                  "next": "/", "_csrf": token},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303, response.text[:300]
         yield test_client
+
+
+def csrf(client: TestClient, path: str) -> str:
+    """The CSRF token from a rendered page, as a browser would submit it."""
+    match = re.search(r'name="_csrf" value="([^"]+)"', client.get(path).text)
+    return match.group(1) if match else ""
+
+
+def post(client: TestClient, path: str, data: dict, *, form_page: str | None = None,
+         **kwargs):
+    """POST with the CSRF token taken from the page the form lives on."""
+    payload = dict(data)
+    payload["_csrf"] = csrf(client, form_page or path)
+    return client.post(path, data=payload, **kwargs)
 
 
 @pytest.fixture
 def stocked(client):
     """One item with 10 units, created through the UI itself."""
-    response = client.post(
-        "/items/new",
-        data={"name": "Canon EOS R5", "description": "Mirrorless body",
-              "quantity": "10", "unit": "Unit A", "shelf": "Shelf 1",
-              "sub_location": "Pelican", "min_quantity": "2",
-              "barcode": "", "product_url": ""},
-        follow_redirects=False,
+    response = post(
+        client, "/items/new",
+        {"name": "Canon EOS R5", "description": "Mirrorless body",
+         "quantity": "10", "unit": "Unit A", "shelf": "Shelf 1",
+         "sub_location": "Pelican", "min_quantity": "2",
+         "barcode": "", "product_url": ""},
+        form_page="/items/new", follow_redirects=False,
     )
-    assert response.status_code == 303
+    assert response.status_code == 303, response.text[:400]
     return int(re.search(r"/items/(\d+)", response.headers["location"]).group(1))
 
 
 # -- pages render ----------------------------------------------------------
 @pytest.mark.parametrize(
     "path",
-    ["/", "/items", "/loans", "/people", "/history", "/whoami", "/labels",
-     "/export.csv", "/health"],
+    ["/", "/items", "/loans", "/people", "/history", "/labels", "/export.csv",
+     "/health", "/requests", "/requests/mine", "/accounts", "/account"],
 )
 def test_pages_render(client, path):
     assert client.get(path).status_code == 200
@@ -54,47 +88,14 @@ def test_item_page_renders(client, stocked):
     assert "CIS-000001" in body
 
 
-def test_health_reports_real_numbers(client, stocked):
-    payload = client.get("/health").json()
-    assert payload["status"] == "ok"
-    assert payload["item_count"] == 1
-    assert payload["total_units"] == 10
-
-
-# -- identity --------------------------------------------------------------
-def test_changing_things_requires_identifying_yourself(temp_env):
+def test_health_is_public_and_says_little(temp_env):
+    """A liveness probe, reachable without a session and carrying no detail."""
     from stockroom.web.app import app
 
     with TestClient(app) as anonymous:
-        response = anonymous.get("/items/new", follow_redirects=False)
-        assert response.status_code == 303
-        assert response.headers["location"].startswith("/whoami")
-
-
-def test_setting_your_name_then_continuing(temp_env):
-    from stockroom.web.app import app
-
-    with TestClient(app) as fresh:
-        response = fresh.post(
-            "/whoami",
-            data={"name": "Carter", "email": "carter@rit.edu", "next": "/items"},
-            follow_redirects=False,
-        )
-        assert response.status_code == 303
-        assert response.headers["location"].startswith("/items")
-        assert "Carter" in fresh.cookies["stockroom_operator"]
-
-
-def test_whoami_will_not_redirect_off_site(temp_env):
-    from stockroom.web.app import app
-
-    with TestClient(app) as fresh:
-        response = fresh.post(
-            "/whoami",
-            data={"name": "Carter", "email": "", "next": "https://evil.test/"},
-            follow_redirects=False,
-        )
-        assert not response.headers["location"].startswith("http")
+        payload = anonymous.get("/health").json()
+    assert payload["status"] == "ok"
+    assert set(payload) == {"status", "version", "schema_version", "item_count"}
 
 
 def test_the_actor_reaches_the_audit_log(client, stocked, temp_env):
@@ -104,40 +105,26 @@ def test_the_actor_reaches_the_audit_log(client, stocked, temp_env):
     assert event.actor == "Test Operator <operator@rit.edu>"
 
 
-def test_sso_headers_take_precedence_over_the_cookie(client, stocked, temp_env):
-    """The seam that RIT Shibboleth will plug into (docs/sso-integration.md)."""
+# -- the checkout flow -----------------------------------------------------
+def test_checkout_then_partial_return(client, stocked, temp_env):
     from stockroom import db
 
-    client.post(
-        f"/items/{stocked}/edit",
-        data={"name": "Canon EOS R5", "description": "via sso", "quantity": "10",
-              "unit": "Unit A", "shelf": "Shelf 1", "sub_location": "Pelican",
-              "min_quantity": "2", "barcode": "CIS-000001", "product_url": ""},
-        headers={"X-Shib-DisplayName": "Real Person", "X-Shib-Mail": "rp1234@rit.edu"},
+    response = post(
+        client, f"/items/{stocked}/checkout",
+        {"person_email": "alice@rit.edu", "person_name": "Alice Nguyen",
+         "quantity": "3", "due_at": "", "note": "senior project"},
+        form_page=f"/items/{stocked}", follow_redirects=True,
     )
-    event = service.list_events(db.connect(), item_id=stocked)[0]
-    assert event.actor == "Real Person <rp1234@rit.edu>"
-
-
-# -- the checkout flow -----------------------------------------------------
-def test_checkout_then_partial_return(client, stocked):
-    response = client.post(
-        f"/items/{stocked}/checkout",
-        data={"person_email": "alice@rit.edu", "person_name": "Alice Nguyen",
-              "quantity": "3", "due_at": "", "note": "senior project"},
-        follow_redirects=True,
-    )
-    assert response.status_code == 200
     assert "Checked out 3 x Canon EOS R5 to Alice Nguyen" in response.text
 
     page = client.get(f"/items/{stocked}").text
     assert "Alice Nguyen" in page
-    assert re.search(r"<strong>7</strong>\s*of\s*10", page), "availability should read 7 of 10"
+    assert re.search(r"<strong>7</strong>\s*of\s*10", page)
 
-    from stockroom import db
     loan = service.list_loans(db.connect(), open_only=True)[0]
-    client.post(f"/loans/{loan.id}/return",
-                data={"quantity": "1", "next": f"/items/{stocked}"})
+    post(client, f"/loans/{loan.id}/return",
+         {"quantity": "1", "next": f"/items/{stocked}"},
+         form_page=f"/items/{stocked}")
 
     item = service.get_item(db.connect(), stocked)
     assert item.available == 8
@@ -145,11 +132,11 @@ def test_checkout_then_partial_return(client, stocked):
 
 
 def test_over_checkout_shows_a_message_not_a_crash(client, stocked):
-    response = client.post(
-        f"/items/{stocked}/checkout",
-        data={"person_email": "alice@rit.edu", "person_name": "Alice",
-              "quantity": "99", "due_at": "", "note": ""},
-        follow_redirects=True,
+    response = post(
+        client, f"/items/{stocked}/checkout",
+        {"person_email": "alice@rit.edu", "person_name": "Alice",
+         "quantity": "99", "due_at": "", "note": ""},
+        form_page=f"/items/{stocked}", follow_redirects=True,
     )
     assert response.status_code == 200
     assert "available" in response.text
@@ -157,20 +144,18 @@ def test_over_checkout_shows_a_message_not_a_crash(client, stocked):
 
 
 def test_a_due_date_survives_to_the_overdue_list(client, stocked):
-    client.post(
-        f"/items/{stocked}/checkout",
-        data={"person_email": "alice@rit.edu", "person_name": "Alice",
-              "quantity": "1", "due_at": "2020-01-01", "note": ""},
-    )
+    post(client, f"/items/{stocked}/checkout",
+         {"person_email": "alice@rit.edu", "person_name": "Alice",
+          "quantity": "1", "due_at": "2020-01-01", "note": ""},
+         form_page=f"/items/{stocked}")
     assert "Overdue" in client.get("/loans?filter=overdue").text
 
 
 def test_a_new_borrower_is_created_by_checking_out(client, stocked):
-    client.post(
-        f"/items/{stocked}/checkout",
-        data={"person_email": "newbie@rit.edu", "person_name": "New Bie",
-              "quantity": "1", "due_at": "", "note": ""},
-    )
+    post(client, f"/items/{stocked}/checkout",
+         {"person_email": "newbie@rit.edu", "person_name": "New Bie",
+          "quantity": "1", "due_at": "", "note": ""},
+         form_page=f"/items/{stocked}")
     assert "New Bie" in client.get("/people").text
 
 
@@ -187,29 +172,30 @@ def test_scanning_something_unknown_falls_back_to_search(client, stocked):
 
 # -- items, history, labels ------------------------------------------------
 def test_editing_records_history_visible_in_the_ui(client, stocked):
-    client.post(
-        f"/items/{stocked}/edit",
-        data={"name": "Canon EOS R5", "description": "Mirrorless body",
-              "quantity": "10", "unit": "Unit C", "shelf": "Shelf 9",
-              "sub_location": "", "min_quantity": "2",
-              "barcode": "CIS-000001", "product_url": ""},
-    )
+    post(client, f"/items/{stocked}/edit",
+         {"name": "Canon EOS R5", "description": "Mirrorless body",
+          "quantity": "10", "unit": "Unit C", "shelf": "Shelf 9",
+          "sub_location": "", "min_quantity": "2",
+          "barcode": "CIS-000001", "product_url": ""},
+         form_page=f"/items/{stocked}/edit")
     history = client.get(f"/history?item_id={stocked}").text
     assert "item.relocate" in history
     assert "Unit C / Shelf 9" in history
 
 
 def test_archiving_hides_the_item_from_the_list(client, stocked):
-    client.post(f"/items/{stocked}/archive")
+    post(client, f"/items/{stocked}/archive", {}, form_page=f"/items/{stocked}")
     assert "Canon EOS R5" not in client.get("/items").text
     assert "Canon EOS R5" in client.get("/items?filter=archived").text
 
 
 def test_archiving_a_lent_item_is_refused(client, stocked):
-    client.post(f"/items/{stocked}/checkout",
-                data={"person_email": "a@rit.edu", "person_name": "A",
-                      "quantity": "1", "due_at": "", "note": ""})
-    response = client.post(f"/items/{stocked}/archive", follow_redirects=True)
+    post(client, f"/items/{stocked}/checkout",
+         {"person_email": "a@rit.edu", "person_name": "A", "quantity": "1",
+          "due_at": "", "note": ""},
+         form_page=f"/items/{stocked}")
+    response = post(client, f"/items/{stocked}/archive", {},
+                    form_page=f"/items/{stocked}", follow_redirects=True)
     assert "still checked out" in response.text
 
 
@@ -236,14 +222,26 @@ def test_a_missing_item_renders_a_404_page(client):
     assert "Not found" in response.text
 
 
-# -- the public page is served --------------------------------------------
+# -- the public page -------------------------------------------------------
 def test_the_public_page_is_served_and_excludes_borrowers(client, stocked):
-    client.post(f"/items/{stocked}/checkout",
-                data={"person_email": "alice@rit.edu", "person_name": "Alice Nguyen",
-                      "quantity": "2", "due_at": "", "note": ""})
-    client.post("/publish")
+    post(client, f"/items/{stocked}/checkout",
+         {"person_email": "alice@rit.edu", "person_name": "Alice Nguyen",
+          "quantity": "2", "due_at": "", "note": ""},
+         form_page=f"/items/{stocked}")
+    post(client, "/publish", {}, form_page="/")
 
     body = client.get("/public/index.html").text
     assert "Canon EOS R5" in body
     assert "Alice Nguyen" not in body
     assert "alice@rit.edu" not in body
+
+
+def test_the_public_page_needs_no_session(client, stocked, temp_env):
+    """The whole point: availability is answerable without logging in."""
+    from stockroom.web.app import app
+
+    post(client, "/publish", {}, form_page="/")
+    with TestClient(app) as anonymous:
+        response = anonymous.get("/public/index.html")
+    assert response.status_code == 200
+    assert "Canon EOS R5" in response.text

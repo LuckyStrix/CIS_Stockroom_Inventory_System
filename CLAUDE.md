@@ -5,22 +5,52 @@ Science stockroom. Runs on a Raspberry Pi on the stockroom LAN.
 
 ## The rule
 
-> **Every mutation goes through `src/stockroom/service.py`, which writes the
-> change and its `event` row in the same transaction. Nothing else writes to
-> `item`, `loan` or `person`.**
+> **Every mutation goes through a service module — `service.py` (inventory),
+> `accounts.py` (people and sessions) or `requests_service.py` (requests) —
+> which writes the change and its `event` row in the same transaction.
+> Nothing else writes to the tables.**
 
 This is the point of the system — the stockroom needs to know who had what and
 when, and that guarantee is worth more than any feature. If you add a mutating
 function:
 
-1. Put it in `service.py`.
+1. Put it in the matching service module.
 2. Wrap it in `db.transaction()`.
 3. Call `log_event()` inside that transaction.
 4. Add it to `MUTATIONS` and the call table in `tests/test_audit.py`.
 
-`test_no_mutating_function_is_missing_from_the_table` fails if a new function
-takes `actor: Actor` and is not audit-tested. That is intentional — do not
-weaken it to make it pass; add the test.
+`test_no_mutating_function_is_missing_from_the_table` scans all three service
+modules and fails if a function takes `actor: Actor` and is not audit-tested.
+That is intentional — do not weaken it to make it pass; add the test.
+
+The one documented exception is the session heartbeat (`last_seen_at` and the
+sliding idle expiry): a page view is not a domain change, and logging it would
+bury the inventory history.
+
+## Security invariants
+
+Two tests in `tests/test_authz.py` enumerate the application's real route table:
+
+- **every route** is either on `deps.PUBLIC_PATHS` or rejects anonymous callers;
+- **every POST** rejects a request with no CSRF token.
+
+Both will fail on a newly added route that skips a guard. That is the point —
+fix the route, not the test.
+
+Other things that are load-bearing:
+
+- **CSRF is checked in middleware**, reading the body with `request.body()`.
+  Do **not** switch it to `request.form()`: Starlette only replays a body it
+  saw read via `body()`, and `form()` leaves every downstream route seeing an
+  empty form. Covered by `test_csrf_middleware_does_not_eat_the_request_body`.
+- **No inline JavaScript or `style=` attributes**, anywhere. The CSP has no
+  `unsafe-inline`, so an inline handler fails silently in the browser. Barcode
+  SVGs use `fill=` attributes for the same reason.
+- **`deps.safe_path()` guards every caller-supplied redirect** (`next`,
+  `Referer`). Skipping it reintroduces an open redirect.
+- **Do not trust `X-Shib-*` or `X-Remote-User` headers.** That support was
+  removed deliberately; nginx passes client headers through, so trusting them
+  is impersonation-as-a-service. See `docs/sso-integration.md`.
 
 ## Conventions
 
@@ -72,16 +102,29 @@ tests/    deploy/    docs/
 ## Testing
 
 ```bash
-.venv/bin/pytest              # 128 tests, ~8s
+.venv/bin/pytest              # 259 tests, ~90s
 ```
 
 `tests/test_web.py` drives real HTTP requests through the actual routes and
 templates, so a template referencing a variable a route does not pass will
 fail there rather than in production.
 
+## Layout additions (phase 2)
+
+```
+accounts.py            <- accounts, passwords, sessions, lockout
+requests_service.py    <- the three request workflows
+security.py            <- hashing, tokens, CSRF, rate limiting
+web/routes_auth.py  routes_accounts.py  routes_requests.py
+deploy/harden-pi.sh  nginx-stockroom.conf
+docs/security.md  accounts-and-requests.md
+```
+
 ## Not goals (for now)
 
-No authentication, CSRF tokens or rate limiting — this is a trusted-LAN tool
-by explicit choice. The next major piece of work is RIT Shibboleth SSO; all
-identity logic is already isolated in `web/deps.py::current_actor()`. See
-`docs/sso-integration.md` before touching anything identity-related.
+No internet exposure, no email (so no self-service password reset and no
+notifications), no full-disk encryption. The next major piece of work is RIT
+Shibboleth SSO, which deletes the password machinery entirely; identity is
+isolated in `web/deps.py::current_account()`. Read
+`docs/sso-integration.md` — especially the note about headers — before
+touching anything identity-related.

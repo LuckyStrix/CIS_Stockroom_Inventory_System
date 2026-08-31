@@ -14,29 +14,39 @@ itself.
 
 ## What we have today
 
-Identity is **self-declared and unverified**. On first use the browser is
-asked "who are you?", and the answer is stored in the `stockroom_operator`
-cookie and recorded on every audit event.
+Real accounts, held in this application: RIT email plus a password hashed with
+scrypt, server-side revocable sessions, staff approval before a new account can
+sign in, and role-based authorisation. See [security.md](security.md).
 
-This is deliberate, not an oversight. The system is on the stockroom LAN, the
-threat model is "who moved the tripod", and the audit log needs a name against
-each change far more than it needs a password. Anyone on the network can
-currently claim to be anyone.
+That is a genuine authentication system, and it is deliberately **interim**.
+Its weaknesses are the ones SSO exists to remove:
 
-## Why the change is small
+- we are storing passwords, which is a liability we would rather not carry;
+- nothing verifies that an address belongs to the person who typed it — staff
+  approval is the only check;
+- there is no password reset, because there is no mail server;
+- it is one more credential for people to manage.
 
-All of the identity logic is in exactly one function:
+## Why the change is still small
+
+All identity logic is in one function:
 
 ```
-src/stockroom/web/deps.py :: current_actor()
+src/stockroom/web/deps.py :: current_account()
 ```
 
-Everything downstream — every route, the whole service layer, the audit log —
-receives an `Actor` object and never asks where it came from. `current_actor()`
-**already reads Shibboleth attribute headers** and prefers them over the
-cookie, so a correctly configured SP in front of the app makes SSO work with
-no code change at all. `tests/test_web.py::test_sso_headers_take_precedence_over_the_cookie`
-covers that path.
+Everything downstream — every route, all three service modules, the audit log —
+receives an `Account` (or the `Actor` derived from it) and never asks where it
+came from. SSO replaces the body of that function and nothing else.
+
+> **Note for whoever does this work.** An earlier revision had
+> `current_actor()` read `X-Shib-*` request headers and prefer them over the
+> session. That was **removed on purpose**, and it should not be restored
+> casually: nginx currently passes client headers through, so trusting them
+> would let anyone on the LAN impersonate any user by setting a header. The
+> header path is only safe once the SP is actually in front of the app **and**
+> nginx explicitly clears those headers from client requests. Do both in the
+> same change, or neither.
 
 ## Recommended approach: Shibboleth SP in front of the app
 
@@ -89,11 +99,21 @@ logout — all the parts that are easy to get subtly and dangerously wrong.
        AuthType shibboleth
        ShibRequestSetting requireSession 1
        Require valid-user
+
+       # Clear anything the client sent under these names FIRST. Without
+       # these two lines a user can simply set X-Shib-Mail themselves and
+       # become whoever they like -- this is the whole security of the
+       # header approach.
+       RequestHeader unset X-Shib-Mail
+       RequestHeader unset X-Shib-DisplayName
+
        RequestHeader set X-Shib-Mail        %{mail}e
        RequestHeader set X-Shib-DisplayName %{displayName}e
    </Location>
    ```
-   Those are the header names `current_actor()` already looks for.
+   The nginx equivalent, in `deploy/nginx-stockroom.conf`, is to set those
+   headers explicitly in the `location` block (an unset `proxy_set_header`
+   value clears the header) so a client-supplied value can never pass through.
 
 6. **Leave the public page unauthenticated.** `/public/*` must stay open — the
    whole point is that anyone can check stock without logging in. Exclude it
@@ -101,28 +121,33 @@ logout — all the parts that are easy to get subtly and dangerously wrong.
 
 ### Code changes required
 
-Genuinely small, and mostly deletion:
+Genuinely small, because the hard parts — roles, sessions, the audit trail —
+already exist:
 
-- `deps.py::current_actor()` — drop the cookie fallback once SSO is live, so
-  identity cannot be spoofed by clearing a cookie.
-- `deps.py::require_actor()` — a missing session becomes a 401 rather than a
-  redirect to `/whoami`.
-- Delete the `/whoami` route and template.
-- `base.html` — replace the "change" link with a Shibboleth logout link.
+- `deps.py::current_account()` — resolve the account from the SP headers
+  instead of the session cookie, matching on `account.email`.
+- `accounts.py` — auto-provision an account on first SSO login, at role
+  `requester`. Approval is no longer needed for identity (the IdP has proved
+  it), though the stockroom may still want it for access.
+- Delete `login`, `register`, the password column and
+  `security.hash_password` / `verify_password`. **This is the win**: the
+  password liability goes away entirely.
+- `base.html` — point "Sign out" at the Shibboleth logout URL.
+- `nginx-stockroom.conf` — clear client-supplied `X-Shib-*` headers, as above.
 
-### Roles, to add at the same time
+### Roles carry over unchanged
 
-Authentication answers *who*; the stockroom will immediately want *what they
-may do*. Suggested minimum, driven off `eduPersonAffiliation` plus a staff
-allow-list in the `person` table:
+`requester` / `staff` / `admin` already exist and already gate every route.
+The only decision is how someone becomes staff: keep it manual (an admin
+promotes them, which is what happens now) or drive it from
+`eduPersonAffiliation`. Manual is probably right — "employee" is a much larger
+set than "works in this stockroom".
 
-| Role | May |
-|---|---|
-| **Viewer** (any RIT login) | see inventory, availability and their own loans |
-| **Staff** | everything: check in/out for others, edit items, import |
+### Migrating existing accounts
 
-This needs a `person.role` column and a dependency that gates the mutating
-routes. It is the one piece of real work beyond configuration.
+Accounts are keyed by RIT email, and so is the Shibboleth `mail` attribute, so
+existing accounts light up on first SSO login with their roles and history
+intact. Keep password login working for one term alongside SSO, then drop it.
 
 ## Alternative: SAML inside the app
 

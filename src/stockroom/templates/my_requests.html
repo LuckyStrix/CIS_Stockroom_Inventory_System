@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}My requests{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>My requests</h1>
+    <p class="lede">Everything you have asked for, and where it got to.</p>
+  </div>
+  <div class="actions">
+    <a class="btn" href="/requests/new/borrow">Borrow equipment</a>
+    <a class="btn secondary" href="/requests/new/new_item">Suggest an item</a>
+    <a class="btn secondary" href="/requests/new/open_hours">Ask us to open</a>
+  </div>
+</div>
+
+<div class="tablewrap">
+{% if requests %}
+<table>
+  <thead><tr><th>#</th><th>Type</th><th>What</th><th>Status</th><th>Filed</th><th></th></tr></thead>
+  <tbody>
+    {% for r in requests %}
+    <tr>
+      <td><a href="/requests/{{ r.id }}">{{ r.id }}</a></td>
+      <td class="nowrap">{{ r.kind_label }}</td>
+      <td><a href="/requests/{{ r.id }}">{{ r.title }}</a>
+        {% if r.requester_note %}<div class="muted small">{{ r.requester_note|truncate(70) }}</div>{% endif %}</td>
+      <td><span class="pill {{ r.status|status_class }}">{{ r.status }}</span></td>
+      <td class="nowrap muted">{{ r.created_at|datetime }}</td>
+      <td class="nowrap">
+        {% if r.is_open %}
+        <form method="post" action="/requests/{{ r.id }}/cancel" class="inline">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="next" value="/requests/mine">
+          <button class="btn small secondary">Withdraw</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">
+  You have not filed any requests yet.
+  <div class="mt"><a class="btn" href="/requests/new/borrow">Borrow something</a></div>
+</div>
+{% endif %}
+</div>
+{% endblock %}

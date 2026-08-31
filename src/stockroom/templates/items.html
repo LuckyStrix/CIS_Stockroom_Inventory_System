@@ -3,7 +3,7 @@
 {% block title %}Items{% endblock %}
 {% block content %}
 
-<div style="display:flex;justify-content:space-between;align-items:start;gap:12px;flex-wrap:wrap">
+<div class="headrow">
   <div>
     <h1>Items</h1>
     <p class="lede">{{ items|length }} shown{% if query %} matching “{{ query }}”{% endif %}.</p>
@@ -45,7 +45,7 @@
 {% else %}
 <div class="empty">
   No items{% if query %} match that search{% endif %}.
-  <div style="margin-top:12px"><a class="btn" href="/items/new">Add an item</a></div>
+  <div class="mt"><a class="btn" href="/items/new">Add an item</a></div>
 </div>
 {% endif %}
 </div>

@@ -157,3 +157,60 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0}
 dl.kv dt{color:var(--muted);font-size:.82rem;text-transform:uppercase;letter-spacing:.03em}
 dl.kv dd{margin:0}
 .pagination{display:flex;gap:8px;margin-top:16px;align-items:center}
+
+/* ---------------------------------------------------------------------------
+   Phase 2: accounts, requests, and the utility classes that replaced inline
+   style="" attributes.
+
+   Those attributes are gone on purpose, not for tidiness: a strict
+   Content-Security-Policy blocks inline styles, and carving out
+   `style-src-attr 'unsafe-inline'` to keep a handful of them would weaken the
+   policy for every page. See web/app.py.
+   --------------------------------------------------------------------------- */
+
+/* layout utilities */
+.narrow{max-width:520px;margin:0 auto}
+.headrow{display:flex;justify-content:space-between;align-items:flex-start;
+  gap:12px;flex-wrap:wrap;margin-bottom:4px}
+.mt{margin-top:16px}
+.flush{margin-bottom:0}
+.center{text-align:center}
+.small{font-size:.85rem}
+.tiny{font-size:.7rem;padding:2px 7px}
+.inline{display:inline}
+.spacer{flex:1}
+.qty{width:72px}
+.wide{width:100%}
+hr{border:0;border-top:1px solid var(--line);margin:18px 0}
+
+/* a button that reads as a link -- used for POST actions that must not be
+   GET links, such as signing out */
+.linkbutton{background:none;border:0;padding:0;font:inherit;color:var(--accent);
+  cursor:pointer;text-decoration:underline}
+.linkbutton:hover{color:var(--accent-dark)}
+
+/* nav badges for pending work */
+.badge{display:inline-block;min-width:18px;padding:1px 6px;border-radius:999px;
+  background:var(--accent);color:#fff;font-size:.72rem;font-weight:700;
+  text-align:center;vertical-align:1px}
+
+/* the "needs your attention" card on the staff inbox */
+.card.attention{border-color:var(--accent);border-left-width:4px}
+
+/* borderless table, for lists inside cards */
+table.plain{border-collapse:collapse;width:100%}
+table.plain td{padding:8px 0;border-bottom:1px solid var(--line);vertical-align:top}
+table.plain tr:last-child td{border-bottom:0}
+table.plain tr:hover{background:transparent}
+
+/* compact select, for the inline role picker */
+select.compact{width:auto;padding:5px 8px;font-size:.85rem}
+
+/* the account/session pages put several forms side by side */
+.who form.inline{display:inline}
+.who .pill{margin:0 4px}
+
+@media (max-width:620px){
+  .headrow{flex-direction:column}
+  .headrow .actions{width:100%}
+}

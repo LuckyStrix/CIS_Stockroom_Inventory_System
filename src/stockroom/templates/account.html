@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "_macros.html" import loan_rows with context %}
+{% block title %}My account{% endblock %}
+{% block content %}
+
+<h1>{{ subject.name }}</h1>
+<p class="lede mono">{{ subject.email }}
+  <span class="pill {{ subject.status|status_class }}">{{ subject.status }}</span>
+  <span class="pill grey">{{ subject.role }}</span>
+</p>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Change password</h2>
+    <form method="post" action="/account/password">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="current_password">Current password</label>
+        <input id="current_password" name="current_password" type="password"
+               required autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label for="new_password">New password</label>
+        <input id="new_password" name="new_password" type="password" required
+               autocomplete="new-password" minlength="{{ min_length }}">
+        <div class="hint">At least {{ min_length }} characters.</div>
+      </div>
+      <div class="field">
+        <label for="new_password_confirm">Confirm new password</label>
+        <input id="new_password_confirm" name="new_password_confirm" type="password"
+               required autocomplete="new-password">
+      </div>
+      <button class="btn">Change password</button>
+      <div class="hint">You will be signed out everywhere and need to sign in again.</div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Signed-in devices</h2>
+    <table class="plain">
+      <tbody>
+        {% for s in sessions %}
+        <tr>
+          <td>
+            <div class="mono small">{{ s.ip or "unknown address" }}</div>
+            <div class="muted small">{{ s.user_agent|truncate(52) or "unknown browser" }}</div>
+          </td>
+          <td class="nowrap muted small">last used {{ s.last_seen_at|datetime }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="muted">No other active sessions.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <form method="post" action="/account/revoke-sessions" class="mt">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn secondary">Sign out everywhere</button>
+    </form>
+  </div>
+</div>
+
+<h2>Equipment you have out</h2>
+<div class="tablewrap">
+{% if my_loans %}
+<table>
+  <thead><tr><th>Item</th><th>Borrower</th><th class="num">Qty</th><th>Out since</th><th>Due</th><th></th></tr></thead>
+  <tbody>{{ loan_rows(my_loans, now) }}</tbody>
+</table>
+{% else %}<div class="empty">Nothing checked out to you.</div>{% endif %}
+</div>
+
+<h2>Your recent requests</h2>
+<div class="tablewrap">
+{% if my_requests %}
+<table>
+  <thead><tr><th>#</th><th>Type</th><th>What</th><th>Status</th><th>Filed</th></tr></thead>
+  <tbody>
+    {% for r in my_requests %}
+    <tr>
+      <td><a href="/requests/{{ r.id }}">{{ r.id }}</a></td>
+      <td class="nowrap">{{ r.kind_label }}</td>
+      <td>{{ r.title }}</td>
+      <td><span class="pill {{ r.status|status_class }}">{{ r.status }}</span></td>
+      <td class="nowrap muted">{{ r.created_at|datetime }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}<div class="empty">You have not filed any requests.</div>{% endif %}
+</div>
+
+<p class="mt"><a class="btn" href="/requests/mine">All my requests</a></p>
+{% endblock %}

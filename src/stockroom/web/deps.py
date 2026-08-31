@@ -1,126 +1,336 @@
-"""Shared request plumbing: the current operator, templates, flash messages.
+"""Request plumbing: identity, authorisation, CSRF, templates, flashes.
 
     ======================================================================
-    THE SSO SEAM: `current_actor()` below is the ONE function that decides
-    who is performing an action. Everything else -- routes, service layer,
-    audit log -- takes an Actor and does not care where it came from.
-    Swapping the cookie for a Shibboleth session is a change to this
-    function and nothing else. See docs/sso-integration.md.
+    THE IDENTITY SEAM: `current_account()` is the one function that decides
+    who is making a request. Routes take an Account (or an Actor) and never
+    ask where it came from, so replacing session cookies with Shibboleth is
+    a change to this file alone -- see docs/sso-integration.md.
     ======================================================================
 
-Today identity is self-declared: the browser is asked "who are you?" once and
-the answer is kept in a cookie. That is appropriate for a trusted stockroom
-LAN and useless as a security control, which is the documented, deliberate
-trade-off for this phase -- the point of recording the actor now is
-accountability in the audit log, not access control.
+Phase 1 read a self-declared name from a cookie. That is gone: identity now
+comes from a server-side session, and everything that changes data requires
+one.
+
+Authorisation is expressed as dependencies -- `require_staff`, `require_admin`
+-- so a route's permissions are visible in its signature rather than buried in
+its body. `tests/test_authz.py` walks every route in the application and fails
+if one is neither explicitly public nor protected, which is what stops a new
+route being added unguarded by accident.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import config, db, service
+from .. import accounts, config, db, security, service
+from ..accounts import Account
 from ..service import Actor
 
 _PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
 templates = Jinja2Templates(directory=str(_PACKAGE_DIR / "templates"))
 
-ACTOR_COOKIE = "stockroom_operator"
-COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # a year; this is a convenience, not a session
+# The __Host- prefix is enforced by the browser: it refuses the cookie unless
+# it is Secure, Path=/ and has no Domain. That makes it impossible for a
+# subdomain -- or a network attacker who can spoof one -- to plant a session
+# cookie for this site. It requires HTTPS, so plain-HTTP development falls
+# back to the unprefixed name.
+SESSION_COOKIE_SECURE = "__Host-stockroom_session"
+SESSION_COOKIE_PLAIN = "stockroom_session"
 
-# Headers a Shibboleth SP (mod_shib) puts in front of the app. Read here so
-# that the day SSO is switched on, the app picks the identity up with no code
-# change -- see docs/sso-integration.md.
-_SSO_NAME_HEADERS = ("x-shib-displayname", "displayname", "x-remote-user-name")
-_SSO_MAIL_HEADERS = ("x-shib-mail", "mail", "x-remote-user-email")
+CSRF_FIELD = "_csrf"
+
+# Anonymous visitors need CSRF protection too -- the login form is a real
+# target. An attacker who can make your browser POST to /login with *their*
+# credentials logs you into their account, and then watches what you do in it.
+# So there are two token sources:
+#
+#   signed in  -> the token stored on the session row (synchroniser pattern)
+#   anonymous  -> a token in its own cookie, echoed in the form (double submit)
+#
+# The session-bound token is the stronger of the two and is used whenever one
+# exists; the cookie only covers the handful of pre-login forms.
+CSRF_COOKIE = "stockroom_csrf"
+
+# Routes reachable without a session. Everything else requires one; the test
+# that enumerates routes uses this same list, so it cannot drift from reality.
+PUBLIC_PATHS = frozenset({
+    "/login", "/logout", "/register", "/health",
+    "/openapi.json", "/api/docs", "/redoc", "/docs/oauth2-redirect",
+})
+PUBLIC_PREFIXES = ("/static/", "/public/", "/public")
+
+
+def is_public_path(path: str) -> bool:
+    return path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES)
 
 
 def get_conn() -> sqlite3.Connection:
-    """The database connection for this request (thread-local)."""
     return db.connect()
 
 
-def _header(request: Request, names: tuple[str, ...]) -> str:
-    for name in names:
-        value = request.headers.get(name)
-        if value:
-            return value.strip()
-    return ""
+# ---------------------------------------------------------------------------
+# cookies
+# ---------------------------------------------------------------------------
+
+
+def cookie_name(request: Request) -> str:
+    return SESSION_COOKIE_SECURE if _is_secure(request) else SESSION_COOKIE_PLAIN
+
+
+def _is_secure(request: Request) -> bool:
+    """Whether this request arrived over TLS.
+
+    In production nginx terminates TLS and forwards over loopback, so the
+    scheme comes from X-Forwarded-Proto -- which uvicorn only honours with
+    --proxy-headers, and which is only trustworthy because nothing but nginx
+    can reach the app's port.
+    """
+    if request.url.scheme == "https":
+        return True
+    return request.headers.get("x-forwarded-proto", "").lower() == "https"
+
+
+def set_session_cookie(response, request: Request, token: str) -> None:
+    secure = _is_secure(request)
+    response.set_cookie(
+        cookie_name(request),
+        token,
+        max_age=accounts.ABSOLUTE_TIMEOUT_DAYS * 24 * 3600,
+        httponly=True,      # JavaScript can never read it, so XSS cannot steal it
+        secure=secure,
+        samesite="strict",  # defence in depth behind the CSRF token
+        path="/",
+    )
+
+
+def clear_session_cookie(response, request: Request) -> None:
+    for name in (SESSION_COOKIE_SECURE, SESSION_COOKIE_PLAIN):
+        response.delete_cookie(name, path="/")
+    # Drop the anonymous token too, so the next sign-in starts clean.
+    response.delete_cookie(CSRF_COOKIE, path="/")
+
+
+def session_token(request: Request) -> str:
+    return (
+        request.cookies.get(SESSION_COOKIE_SECURE)
+        or request.cookies.get(SESSION_COOKIE_PLAIN)
+        or ""
+    )
+
+
+def client_ip(request: Request) -> str:
+    """The caller's address, preferring nginx's X-Forwarded-For.
+
+    Only meaningful because the app is not directly reachable: nothing but the
+    local reverse proxy can set that header here.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    return (request.client.host if request.client else "")[:64]
+
+
+# ---------------------------------------------------------------------------
+# identity
+# ---------------------------------------------------------------------------
+
+
+def current_session(request: Request):
+    """Resolve the session for this request, caching it on request.state.
+
+    Cached because a single page render may consult identity several times
+    (navigation, permissions, CSRF) and each call would otherwise be a lookup
+    plus an idle-expiry write.
+    """
+    if hasattr(request.state, "session_pair"):
+        return request.state.session_pair
+    pair = accounts.resolve_session(get_conn(), session_token(request))
+    request.state.session_pair = pair
+    return pair
+
+
+def current_account(request: Request) -> Account | None:
+    """Who is making this request, or None if nobody is signed in."""
+    pair = current_session(request)
+    return pair[1] if pair else None
 
 
 def current_actor(request: Request) -> Actor | None:
-    """Who is making this request, or None if they have not identified.
+    """The audit-log identity for this request."""
+    account = current_account(request)
+    return account.as_actor() if account else None
 
-    Resolution order:
 
-    1. Shibboleth/SP headers, if the app is running behind one. Trusted
-       because only the SP can set them once it is deployed correctly.
-    2. The self-declared cookie (today's default).
-    3. Nobody -- the caller redirects to the "who are you?" page.
+def csrf_token(request: Request) -> str:
+    """The CSRF token this request's forms should carry.
+
+    Prefers the session-bound token. Falls back to the anonymous cookie,
+    minting one (and remembering to set it) if the browser has none yet.
     """
-    email = _header(request, _SSO_MAIL_HEADERS)
-    remote_user = request.headers.get("x-remote-user", "").strip()
-    if email or remote_user:
-        name = _header(request, _SSO_NAME_HEADERS) or email or remote_user
-        return Actor(name=name, email=email or remote_user)
+    pair = current_session(request)
+    if pair:
+        return pair[0].csrf_token
 
-    raw = request.cookies.get(ACTOR_COOKIE, "")
-    if not raw:
-        return None
-    name, _, mail = raw.partition("|")
-    name = name.strip()
-    return Actor(name=name, email=mail.strip()) if name else None
+    existing = request.cookies.get(CSRF_COOKIE, "")
+    if existing:
+        return existing
 
-
-def require_actor(request: Request) -> Actor:
-    """The current operator, or raise a redirect to the identify page."""
-    actor = current_actor(request)
-    if actor is None:
-        raise _IdentifyRedirect(request)
-    return actor
+    minted = getattr(request.state, "new_csrf_cookie", "")
+    if not minted:
+        minted = security.new_token()
+        # Picked up by the security middleware, which sets it on the response.
+        request.state.new_csrf_cookie = minted
+    return minted
 
 
-class _IdentifyRedirect(Exception):
-    """Raised when an unidentified operator hits a page that records changes.
+def expected_csrf(request: Request) -> str:
+    """The token a submission must match, without minting a new one.
 
-    Handled by an exception handler in app.py, which sends them to /whoami
-    with a ?next= pointing back here.
+    Deliberately does *not* fall back to a freshly minted value: a POST that
+    arrives with no session and no cookie has nothing to check against and
+    must fail, not be handed a token that matches whatever it sent.
     """
+    pair = current_session(request)
+    if pair:
+        return pair[0].csrf_token
+    return request.cookies.get(CSRF_COOKIE, "")
+
+
+def set_csrf_cookie(response, request: Request) -> None:
+    """Persist a freshly minted anonymous CSRF token, if one was needed."""
+    minted = getattr(request.state, "new_csrf_cookie", "")
+    if not minted:
+        return
+    response.set_cookie(
+        CSRF_COOKIE,
+        minted,
+        max_age=8 * 3600,
+        httponly=True,     # the server echoes it into the form; JS never needs it
+        secure=_is_secure(request),
+        samesite="lax",    # must survive a normal top-level navigation to /login
+        path="/",
+    )
+
+
+# ---------------------------------------------------------------------------
+# authorisation
+# ---------------------------------------------------------------------------
+
+
+class _LoginRedirect(Exception):
+    """Raised when an anonymous caller reaches a protected page."""
 
     def __init__(self, request: Request) -> None:
         target = request.url.path
         if request.url.query:
             target += "?" + request.url.query
         self.next = target
-        super().__init__("operator not identified")
+        super().__init__("authentication required")
 
 
-def set_actor_cookie(response, actor: Actor) -> None:
-    response.set_cookie(
-        ACTOR_COOKIE,
-        f"{actor.name}|{actor.email}",
-        max_age=COOKIE_MAX_AGE,
-        httponly=False,   # harmless here, and lets the page show who you are
-        samesite="lax",
-    )
+class Forbidden(Exception):
+    """Signed in, but not permitted to do this."""
+
+    def __init__(self, message: str = "You do not have permission to do that.") -> None:
+        self.message = message
+        super().__init__(message)
+
+
+def require_account(request: Request) -> Account:
+    account = current_account(request)
+    if account is None:
+        raise _LoginRedirect(request)
+    return account
+
+
+def require_staff(request: Request) -> Account:
+    account = require_account(request)
+    if not account.is_staff:
+        raise Forbidden("That action is limited to stockroom staff.")
+    return account
+
+
+def require_admin(request: Request) -> Account:
+    account = require_account(request)
+    if not account.is_admin:
+        raise Forbidden("That action is limited to administrators.")
+    return account
+
+
+# FastAPI dependency forms, so a route's permissions show up in its signature.
+CurrentAccount = Depends(require_account)
+StaffOnly = Depends(require_staff)
+AdminOnly = Depends(require_admin)
 
 
 # ---------------------------------------------------------------------------
-# flash messages
-#
-# Carried in the query string rather than server-side session state: the app
-# is a single process with no session store, and the messages are short and
-# non-sensitive ("Checked out 2 x Canon EOS R5").
+# CSRF
 # ---------------------------------------------------------------------------
+
+
+class CSRFError(Exception):
+    """A state-changing request arrived without a valid token."""
+
+
+def verify_csrf(request: Request, submitted: str) -> None:
+    """Check a synchroniser token against the one held in the session.
+
+    SameSite=Strict already blocks the common cross-site POST, but it is a
+    browser behaviour, not a guarantee -- older clients and odd embeddings do
+    not honour it. The token is the actual control; the cookie attribute is
+    the belt to its braces.
+    """
+    expected = expected_csrf(request)
+    if not expected or not security.tokens_equal(expected, submitted or ""):
+        raise CSRFError(
+            "That form has expired or was not submitted from this site. "
+            "Reload the page and try again."
+        )
+
+
+async def csrf_protect(request: Request) -> None:
+    """Dependency that guards every unsafe method.
+
+    Applied globally by middleware in app.py rather than route by route --
+    remembering to add it to each new POST is exactly the kind of thing that
+    gets forgotten.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS", "TRACE"):
+        return
+    form = await request.form()
+    verify_csrf(request, str(form.get(CSRF_FIELD, "")))
+
+
+# ---------------------------------------------------------------------------
+# redirects and flash messages
+# ---------------------------------------------------------------------------
+
+
+def safe_path(candidate: str, fallback: str = "/") -> str:
+    """Reduce a caller-supplied redirect target to a local path.
+
+    Used for every redirect whose destination came from outside -- a `next`
+    parameter or a Referer header. Without it those are open redirects, which
+    turn this site into a convincing launch pad for a phishing link.
+    """
+    if not candidate:
+        return fallback
+    parsed = urlparse(candidate)
+    if parsed.scheme or parsed.netloc:
+        return fallback              # absolute URL: refuse it
+    if not candidate.startswith("/") or candidate.startswith("//"):
+        return fallback              # relative or protocol-relative: refuse it
+    return candidate
+
+
 def redirect(path: str, *, ok: str = "", error: str = "") -> RedirectResponse:
-    """Redirect after a POST, carrying a flash message."""
     separator = "&" if "?" in path else "?"
     if ok:
         path = f"{path}{separator}ok={quote(ok)}"
@@ -132,16 +342,33 @@ def redirect(path: str, *, ok: str = "", error: str = "") -> RedirectResponse:
 def page(request: Request, template: str, **context):
     """Render a template with the context every page needs."""
     conn = get_conn()
+    account = current_account(request)
+
     context.setdefault("ok", request.query_params.get("ok", ""))
     context.setdefault("error", request.query_params.get("error", ""))
+
+    # Badge counts for the navigation, but only for the people who can act on
+    # them -- a requester has no inbox to clear.
+    pending_requests = pending_accounts = 0
+    if account is not None and account.is_staff:
+        from .. import requests_service
+
+        pending_requests = requests_service.count_pending(conn)
+        pending_accounts = accounts.count_pending(conn)
+
     return templates.TemplateResponse(
         request,
         template,
         {
+            "account": account,
             "actor": current_actor(request),
+            "csrf_token": csrf_token(request),
+            "csp_nonce": getattr(request.state, "csp_nonce", ""),
             "org": config.ORG_NAME,
             "path": request.url.path,
             "summary": service.summary(conn),
+            "pending_requests": pending_requests,
+            "pending_accounts": pending_accounts,
             **context,
         },
     )

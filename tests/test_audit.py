@@ -9,15 +9,32 @@ import inspect
 
 import pytest
 
-from stockroom import service
+from stockroom import accounts, requests_service, service
 from stockroom.service import Actor, ConflictError
 
-# Every public mutating function in service.py, and how to call it. Adding a
-# mutation without adding it here fails test_every_mutation_is_covered.
+# Every public mutating function across the three service modules, and how to
+# call it. Adding a mutation without adding it here fails
+# test_no_mutating_function_is_missing_from_the_table.
 MUTATIONS = {
     "create_item", "update_item", "archive_item", "restore_item",
     "assign_barcode", "create_person", "update_person", "get_or_create_person",
     "checkout", "return_loan",
+}
+
+# accounts.py and requests_service.py follow the same rule as service.py. They
+# are separate modules only because service.py owns inventory and was already
+# long -- the audit guarantee is identical, so the guard covers all three.
+AUDITED_MODULES = (service, accounts, requests_service)
+
+ACCOUNT_MUTATIONS = {
+    "register", "approve", "set_status", "set_role", "change_password",
+    "login", "logout", "revoke_all_sessions",
+}
+
+REQUEST_MUTATIONS = {
+    "submit_borrow", "submit_new_item", "submit_open_hours",
+    "approve", "decline", "cancel", "fulfil_borrow", "fulfil_new_item",
+    "add_open_hours", "cancel_open_hours",
 }
 
 
@@ -143,6 +160,103 @@ def test_every_mutation_is_covered(conn, actor, item, person):
         assert service.count_events(conn) > before, f"{name} wrote no audit event"
 
 
+def test_every_account_mutation_is_audited(conn, actor):
+    """The same guarantee, in accounts.py."""
+    admin = accounts.register(
+        conn, first_name="Root", last_name="Admin", email="root@rit.edu",
+        password="glass onion tuesday lamp", role="admin", status="active",
+        actor=actor,
+    )
+    subject = accounts.register(
+        conn, first_name="Alice", last_name="Nguyen", email="an1234@rit.edu",
+        password="seventeen purple bicycles", actor=actor,
+    )
+    calls = {
+        "register": lambda: accounts.register(
+            conn, first_name="New", last_name="Person", email="np1111@rit.edu",
+            password="Rochester-Fog-Kettle-9", actor=actor),
+        "approve": lambda: accounts.approve(
+            conn, actor=actor, account_id=subject.id, approved_by=admin),
+        "set_role": lambda: accounts.set_role(
+            conn, actor=actor, account_id=subject.id, role="staff"),
+        "change_password": lambda: accounts.change_password(
+            conn, actor=actor, account_id=subject.id,
+            new_password="Kettle-Fog-Rochester-4"),
+        "login": lambda: accounts.login(
+            conn, email="an1234@rit.edu", password="Kettle-Fog-Rochester-4"),
+        "logout": lambda: accounts.logout(
+            conn, token=accounts.login(
+                conn, email="an1234@rit.edu",
+                password="Kettle-Fog-Rochester-4").token),
+        "revoke_all_sessions": lambda: accounts.login(
+            conn, email="an1234@rit.edu", password="Kettle-Fog-Rochester-4"
+        ) and accounts.revoke_all_sessions(
+            conn, actor=actor, account_id=subject.id),
+        "set_status": lambda: accounts.set_status(
+            conn, actor=actor, account_id=subject.id, status="disabled"),
+    }
+    assert set(calls) == ACCOUNT_MUTATIONS, "the call table is out of date"
+
+    for name, call in calls.items():
+        before = service.count_events(conn)
+        call()
+        assert service.count_events(conn) > before, f"{name} wrote no audit event"
+
+
+def test_every_request_mutation_is_audited(conn, actor, item):
+    """The same guarantee, in requests_service.py."""
+    admin = accounts.register(
+        conn, first_name="Root", last_name="Admin", email="root@rit.edu",
+        password="glass onion tuesday lamp", role="admin", status="active",
+        actor=actor,
+    )
+    filed = requests_service.submit_borrow(
+        conn, actor=actor, requester_id=admin.id, item_id=item.id, quantity=1)
+    to_decline = requests_service.submit_new_item(
+        conn, actor=actor, requester_id=admin.id, name="Declinable")
+    to_cancel = requests_service.submit_new_item(
+        conn, actor=actor, requester_id=admin.id, name="Cancellable")
+    to_fulfil_item = requests_service.submit_new_item(
+        conn, actor=actor, requester_id=admin.id, name="Fulfillable")
+    requests_service.approve(
+        conn, actor=actor, request_id=to_fulfil_item.id, decided_by_id=admin.id)
+    slot = requests_service.add_open_hours(
+        conn, actor=actor, window_start="2099-01-01T09:00:00Z",
+        window_end="2099-01-01T11:00:00Z")
+
+    calls = {
+        "submit_borrow": lambda: requests_service.submit_borrow(
+            conn, actor=actor, requester_id=admin.id, item_id=item.id, quantity=1),
+        "submit_new_item": lambda: requests_service.submit_new_item(
+            conn, actor=actor, requester_id=admin.id, name="Another"),
+        "submit_open_hours": lambda: requests_service.submit_open_hours(
+            conn, actor=actor, requester_id=admin.id,
+            window_start="2099-02-01T09:00:00Z",
+            window_end="2099-02-01T11:00:00Z", purpose="both"),
+        "approve": lambda: requests_service.approve(
+            conn, actor=actor, request_id=filed.id, decided_by_id=admin.id),
+        "fulfil_borrow": lambda: requests_service.fulfil_borrow(
+            conn, actor=actor, request_id=filed.id),
+        "fulfil_new_item": lambda: requests_service.fulfil_new_item(
+            conn, actor=actor, request_id=to_fulfil_item.id, item_id=item.id),
+        "decline": lambda: requests_service.decline(
+            conn, actor=actor, request_id=to_decline.id, decided_by_id=admin.id),
+        "cancel": lambda: requests_service.cancel(
+            conn, actor=actor, request_id=to_cancel.id, by_account_id=admin.id),
+        "add_open_hours": lambda: requests_service.add_open_hours(
+            conn, actor=actor, window_start="2099-03-01T09:00:00Z",
+            window_end="2099-03-01T11:00:00Z"),
+        "cancel_open_hours": lambda: requests_service.cancel_open_hours(
+            conn, actor=actor, slot_id=slot.id),
+    }
+    assert set(calls) == REQUEST_MUTATIONS, "the call table is out of date"
+
+    for name, call in calls.items():
+        before = service.count_events(conn)
+        call()
+        assert service.count_events(conn) > before, f"{name} wrote no audit event"
+
+
 def test_no_mutating_function_is_missing_from_the_table():
     """Catch a new public mutation that nobody added to MUTATIONS.
 
@@ -151,19 +265,30 @@ def test_no_mutating_function_is_missing_from_the_table():
     ``actor`` -- list_events uses it as a filter -- so the *annotation* is
     what distinguishes them, not the name.
     """
-    found = set()
-    for name, obj in vars(service).items():
-        if name.startswith("_") or not inspect.isfunction(obj):
-            continue
-        if obj.__module__ != service.__name__:
-            continue
-        if name == "log_event":
-            continue
-        parameter = inspect.signature(obj).parameters.get("actor")
-        if parameter is not None and "Actor" in str(parameter.annotation):
-            found.add(name)
-    missing = found - MUTATIONS
-    assert not missing, (
-        f"These service functions take an actor but are not audit-tested: {missing}. "
-        "Add them to MUTATIONS and to the call table above."
+    expected = {
+        service.__name__: MUTATIONS,
+        accounts.__name__: ACCOUNT_MUTATIONS,
+        requests_service.__name__: REQUEST_MUTATIONS,
+    }
+    problems = []
+    for module in AUDITED_MODULES:
+        found = set()
+        for name, obj in vars(module).items():
+            if name.startswith("_") or not inspect.isfunction(obj):
+                continue
+            if obj.__module__ != module.__name__:
+                continue
+            if name in {"log_event", "check_password_strength"}:
+                continue
+            parameter = inspect.signature(obj).parameters.get("actor")
+            if parameter is not None and "Actor" in str(parameter.annotation):
+                found.add(name)
+        missing = found - expected[module.__name__]
+        if missing:
+            problems.append(f"{module.__name__}: {sorted(missing)}")
+
+    assert not problems, (
+        "These functions take an actor but are not audit-tested: "
+        + "; ".join(problems)
+        + ". Add each to the matching set and call table in this file."
     )

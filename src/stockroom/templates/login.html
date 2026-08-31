@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<div class="narrow">
+  <h1>Sign in</h1>
+  <p class="lede">Stockroom accounts use your RIT email address.</p>
+
+  <div class="card">
+    <form method="post" action="/login">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ next_url }}">
+      <div class="field">
+        <label for="email">RIT email</label>
+        <input id="email" name="email" type="email" required autofocus
+               autocomplete="username" placeholder="abc1234@rit.edu">
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required
+               autocomplete="current-password">
+      </div>
+      <button class="btn wide">Sign in</button>
+    </form>
+  </div>
+
+  <p class="muted center">
+    No account yet? <a href="/register">Request one</a>.
+  </p>
+  <p class="muted small center">
+    New accounts are approved by stockroom staff before you can sign in.
+  </p>
+</div>
+{% endblock %}
