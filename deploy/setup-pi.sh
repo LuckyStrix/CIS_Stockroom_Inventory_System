@@ -155,9 +155,24 @@ install -m 0644 "$REPO_DIR/deploy/nginx-stockroom.conf" \
     /etc/nginx/sites-available/stockroom
 ln -sf /etc/nginx/sites-available/stockroom /etc/nginx/sites-enabled/stockroom
 rm -f /etc/nginx/sites-enabled/default
-# The public page is served straight from disk by nginx, so it needs to be
-# able to traverse into the publish directory.
-chmod 0755 "$DATA_DIR" "$DATA_DIR/publish"
+# The public page is served straight from disk by nginx, so www-data has to
+# reach $DATA_DIR/publish. It does NOT have to read anything else in there.
+#
+# 0755 on $DATA_DIR was how it used to get through, and it also let every
+# local account list and read the directory holding stockroom.db -- every
+# password hash, every session token hash, every email address and the whole
+# audit log. 0751 grants the traverse (--x) that nginx actually needs and
+# nothing else: others can pass through to publish/ but cannot list what is
+# beside it.
+chmod 0751 "$DATA_DIR"
+chmod 0755 "$DATA_DIR/publish"
+# Backups are whole copies of the database, so they are exactly as sensitive.
+chmod 0750 "$DATA_DIR/backups" "$DATA_DIR/photos"
+# An `[[ ... ]] && chmod` one-liner would abort the whole installer here under
+# `set -e` on a fresh Pi, where there is no database yet.
+if [[ -f "$DATA_DIR/stockroom.db" ]]; then
+    chmod 0640 "$DATA_DIR"/stockroom.db*
+fi
 if nginx -t; then
     systemctl enable --now nginx
     systemctl reload nginx

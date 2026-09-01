@@ -117,3 +117,25 @@ def test_assign_barcode_to_an_item_without_one(conn, actor):
 def test_missing_item_raises_not_found(conn):
     with pytest.raises(NotFound):
         service.get_item(conn, 9999)
+
+
+def test_a_product_link_must_be_http(conn, actor):
+    """`<input type="url">` is a hint to the browser, not a check.
+
+    A javascript: URL reached the href on the item page and, through the
+    embedded JSON, the generated public page too. Both are saved today by a
+    CSP with no 'unsafe-inline' -- but the public page is meant to be opened
+    from a USB stick, where its own <meta> policy is all there is.
+    """
+    for bad in ("javascript:alert(1)", "JavaScript:alert(1)", "data:text/html,x"):
+        with pytest.raises(ValidationError, match="http"):
+            service.create_item(conn, actor=actor, name="Bad link", product_url=bad)
+
+    ok = service.create_item(conn, actor=actor, name="Good link",
+                             product_url="https://example.test/thing")
+    assert ok.product_url == "https://example.test/thing"
+
+    with pytest.raises(ValidationError, match="http"):
+        service.update_item(conn, actor=actor, item_id=ok.id,
+                            product_url="javascript:alert(1)")
+    assert service.get_item(conn, ok.id).product_url == "https://example.test/thing"

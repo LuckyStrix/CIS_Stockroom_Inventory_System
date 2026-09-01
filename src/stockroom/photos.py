@@ -131,7 +131,10 @@ def store(data: bytes, *, max_pixels: int | None = None) -> StoredPhoto:
     temporary = target.with_suffix(".part")
     temporary.write_bytes(payload)
     temporary.replace(target)
-    target.chmod(0o644)
+    # 0640, not 0644: photos are served by the app's own /photos route behind
+    # a session, never by nginx off the disk. Nothing outside the service user
+    # needs to read them.
+    target.chmod(0o640)
 
     return StoredPhoto(filename, width, height, len(payload))
 

@@ -178,6 +178,37 @@ def test_the_service_can_write_everything_it_is_configured_to_write():
             )
 
 
+def test_the_database_is_not_world_readable():
+    """It holds every password hash and session token in the stockroom.
+
+    systemd creates the state directory 0755 by default and Python creates
+    the database 0644, so without both of these any local account on the Pi
+    could read the lot. security.py reasons carefully about a stolen SD card
+    and not at all about somebody with a shell.
+    """
+    unit = (_DEPLOY / "stockroom.service").read_text()
+    assert "StateDirectoryMode=0750" in unit
+    assert "UMask=0027" in unit
+
+
+def test_the_installer_does_not_widen_the_data_directory():
+    """nginx needs to traverse into publish/, not to read what is beside it.
+
+    `chmod 0755 $DATA_DIR` was how www-data used to get through, and it let
+    every local account list the directory holding the database. 0751 grants
+    the traverse and nothing else.
+    """
+    body = (_DEPLOY / "setup-pi.sh").read_text()
+    assert re.search(r'chmod 0751 "\$DATA_DIR"', body), \
+        "the data directory must be traverse-only for others"
+    assert not re.search(r'chmod 0755 "\$DATA_DIR"[\s"]', body), \
+        "0755 on the data directory exposes stockroom.db to every local user"
+    assert re.search(r'chmod 0755 "\$DATA_DIR/publish"', body), \
+        "nginx still has to read the generated public page"
+    assert re.search(r'chmod 0750 "\$DATA_DIR/backups"', body), \
+        "a backup is a whole copy of the database"
+
+
 # ---------------------------------------------------------------------------
 # the installer
 # ---------------------------------------------------------------------------

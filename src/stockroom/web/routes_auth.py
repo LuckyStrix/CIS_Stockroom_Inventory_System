@@ -12,6 +12,7 @@ from .deps import (
     client_ip,
     current_account,
     get_conn,
+    login_url,
     page,
     redirect,
     require_account,
@@ -53,7 +54,10 @@ def login(
             user_agent=request.headers.get("user-agent", ""),
         )
     except accounts.AuthError as exc:
-        return redirect(f"/login?next={target}", error=str(exc))
+        # login_url encodes the destination: a `next` carrying its own query
+        # string would otherwise put its parameters onto /login, where an
+        # `ok=` is rendered as a flash message on the sign-in page.
+        return redirect(login_url(target), error=str(exc))
 
     response = redirect(target, ok=f"Signed in as {result.account.name}.")
     # A brand-new token, so a session fixed before login cannot be reused.

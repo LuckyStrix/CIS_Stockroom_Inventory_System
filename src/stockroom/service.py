@@ -344,6 +344,29 @@ def _optional(value: str | None) -> str | None:
     return cleaned or None
 
 
+def _clean_url(value: str | None) -> str | None:
+    """A product link, restricted to http(s), or None.
+
+    `<input type="url">` is a client-side hint and nothing more, so this was
+    the only check -- meaning a `javascript:` URL reached the href on the item
+    page and, via the JSON payload, the generated public page too. Both are
+    currently saved by their CSP, which blocks javascript: navigation because
+    neither policy carries 'unsafe-inline'. That is a good backstop and a bad
+    only line of defence: the public page is meant to be opened from a USB
+    stick and from GitHub Pages, where nothing but its own <meta> policy is
+    standing there.
+    """
+    url = _optional(value)
+    if url is None:
+        return None
+    scheme = url.split(":", 1)[0].lower() if ":" in url else ""
+    if scheme not in ("http", "https"):
+        raise ValidationError(
+            "A product link must start with http:// or https://."
+        )
+    return url
+
+
 def _as_int(value: Any, field: str, *, minimum: int = 0) -> int:
     try:
         number = int(value)
@@ -803,7 +826,7 @@ def create_item(
                               created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (code, name, _clean(description), _optional(product_url), quantity,
+            (code, name, _clean(description), _clean_url(product_url), quantity,
              _clean(unit), _clean(shelf), _optional(sub_location), min_quantity,
              1 if tracked else 0, now, now),
         )
@@ -847,7 +870,7 @@ def update_item(
         if "description" in updates:
             changed["description"] = _clean(updates["description"])
         if "product_url" in updates:
-            changed["product_url"] = _optional(updates["product_url"])
+            changed["product_url"] = _clean_url(updates["product_url"])
         if "unit" in updates:
             changed["unit"] = _clean(updates["unit"])
         if "shelf" in updates:

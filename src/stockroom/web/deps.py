@@ -332,7 +332,36 @@ def safe_path(candidate: str, fallback: str = "/") -> str:
         return fallback              # absolute URL: refuse it
     if not candidate.startswith("/") or candidate.startswith("//"):
         return fallback              # relative or protocol-relative: refuse it
+    # A backslash is a path separator to a browser resolving a URL, so
+    # `/\evil.example` is read as `//evil.example` -- the protocol-relative
+    # form refused one line above, wearing a different hat. Starlette happens
+    # to percent-encode it on the way out, which makes this unexploitable
+    # today, but that is somebody else's implementation detail holding the
+    # line rather than this function doing its job.
+    if "\\" in candidate:
+        return fallback
     return candidate
+
+
+def login_url(target: str) -> str:
+    """The sign-in URL that comes back here afterwards.
+
+    `target` is percent-encoded, and that is the whole point of this function
+    existing rather than three f-strings. A destination carries its own query
+    string -- /items?unit=B&filter=out -- and interpolating it raw let its
+    parameters land on /login as *login's* parameters. Two consequences:
+
+      * the destination came back truncated at the first `&`;
+      * deps.page() renders `?ok=` and `?error=` as flash messages, so
+        anyone could put arbitrary text on the real sign-in page by sending
+        a link to /anything?x=1&ok=Your+password+has+expired.+Call+... It is
+        escaped, so not script -- but a phishing message in the site's own
+        voice, on the genuine page, over the genuine certificate.
+
+    Encoding here means the destination survives intact and cannot smuggle a
+    parameter, whatever it contains.
+    """
+    return f"/login?next={quote(safe_path(target), safe='/')}"
 
 
 def redirect(path: str, *, ok: str = "", error: str = "") -> RedirectResponse:

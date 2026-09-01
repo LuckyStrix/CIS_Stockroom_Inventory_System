@@ -119,7 +119,10 @@ def test_only_the_token_hash_is_ever_stored():
 @pytest.mark.parametrize(
     "candidate",
     ["https://evil.test/", "http://evil.test", "//evil.test/path",
-     "javascript:alert(1)", "", "not-a-path"],
+     "javascript:alert(1)", "", "not-a-path",
+     # A browser resolving a URL reads a backslash as a path separator, so
+     # this is the protocol-relative form wearing a different hat.
+     "/\\evil.test", "/\\/evil.test"],
 )
 def test_offsite_redirect_targets_are_refused(candidate):
     assert deps.safe_path(candidate) == "/"
@@ -138,13 +141,24 @@ def test_every_caller_supplied_next_goes_through_safe_path():
     routes rather than testing one of them, so the next route to take a
     `next` field cannot quietly skip the guard.
     """
+    import importlib
     import inspect
+    import pkgutil
     import re
 
-    from stockroom.web import routes_auth, routes_loans, routes_requests
+    import stockroom.web
+
+    # Every routes_* module, not a hand-kept list of three: the module that
+    # forgets the guard is by definition the one nobody remembered to add.
+    modules = [
+        importlib.import_module(f"stockroom.web.{name}")
+        for _, name, _ in pkgutil.iter_modules(stockroom.web.__path__)
+        if name.startswith("routes_")
+    ]
+    assert len(modules) >= 11, "route modules are not being discovered"
 
     offenders = []
-    for module in (routes_auth, routes_loans, routes_requests):
+    for module in modules:
         source = inspect.getsource(module)
         if 'next: str = Form(' not in source and 'next=' not in source:
             continue
@@ -155,6 +169,44 @@ def test_every_caller_supplied_next_goes_through_safe_path():
         "these modules pass a caller-supplied `next` to redirect() without "
         f"safe_path: {sorted(set(offenders))}"
     )
+
+
+def test_a_destination_cannot_smuggle_a_flash_message_onto_the_login_page(
+    temp_env,
+):
+    """Anyone could put words in the stockroom's mouth with one link.
+
+    The sign-in redirect interpolated the destination raw, so a destination
+    carrying its own query string had its parameters land on /login as
+    *login's* parameters -- and deps.page() renders `ok=` and `error=` as
+    flash messages. The text was escaped, so never script; but a phishing
+    line in the site's own voice, on the genuine page, over the genuine
+    certificate, does not need to be script to work.
+    """
+    import re
+
+    from fastapi.testclient import TestClient
+
+    from stockroom.web.app import app
+
+    with TestClient(app) as client:
+        landing = client.get(
+            "/items?unit=B&ok=Your+password+has+expired.+Call+585-555-0100.",
+            follow_redirects=False,
+        )
+        assert landing.status_code == 303
+        body = client.get(landing.headers["location"]).text
+
+    assert re.findall(r'<div class="flash[^"]*">(.*?)</div>', body, re.S) == [], \
+        "a caller-supplied parameter must not render as a flash message"
+    # And the destination still survives intact rather than being truncated
+    # at the first `&`, which is the same bug read the other way round.
+    assert 'name="next" value="/items?unit=B&amp;ok=' in body
+
+
+def test_the_login_destination_is_encoded():
+    assert deps.login_url("/items?a=1&b=2") == "/login?next=/items%3Fa%3D1%26b%3D2"
+    assert deps.login_url("https://evil.test/") == "/login?next=/"
 
 
 def test_a_public_prefix_does_not_match_a_longer_word():

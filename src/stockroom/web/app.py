@@ -29,6 +29,7 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
@@ -61,6 +62,7 @@ from .deps import (
     Forbidden,
     _LoginRedirect,
     is_public_path,
+    login_url,
     redirect,
     safe_path,
     set_csrf_cookie,
@@ -230,13 +232,18 @@ async def security_middleware(request: Request, call_next):
         # this in production; development has no nginx in front of it.
         declared = request.headers.get("content-length", "")
         if declared.isdigit() and int(declared) > config.MAX_UPLOAD_BYTES:
-            return finish(_error_page(
-                request, 413, "Too large",
-                f"That upload is larger than the "
-                f"{config.MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
-            ))
+            return finish(_too_large(request))
         try:
-            verify_csrf(request, await _submitted_csrf(request))
+            submitted = await _submitted_csrf(request)
+        except _BodyTooLarge:
+            # A chunked request carries no Content-Length, so the header check
+            # above sees nothing to compare and waves it through. nginx caps
+            # the body at 8m in production and is the real defence; this is
+            # what stops the development server, which has no nginx in front
+            # of it, being asked to hold an unbounded body in memory.
+            return finish(_too_large(request))
+        try:
+            verify_csrf(request, submitted)
         except CSRFError as exc:
             return finish(_error_page(request, 403, "Form expired", str(exc)))
 
@@ -249,6 +256,47 @@ async def security_middleware(request: Request, call_next):
 _MULTIPART_SCAN_BYTES = 16 * 1024
 
 
+class _BodyTooLarge(Exception):
+    """The body passed MAX_UPLOAD_BYTES while it was being read."""
+
+
+def _too_large(request: Request):
+    return _error_page(
+        request, 413, "Too large",
+        f"That upload is larger than the "
+        f"{config.MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+    )
+
+
+async def _read_body_capped(request: Request) -> bytes:
+    """Read the whole body, refusing to buffer more than the limit.
+
+    `request.body()` reads to the end whatever the size, so checking the
+    length afterwards has already spent the memory -- which is all the
+    Content-Length header check above can do for a chunked request, since
+    those carry no such header to check.
+
+    Accumulating the stream here and stopping at the ceiling is what actually
+    bounds it. The result is stashed on `_body` exactly as `body()` would do
+    it -- `Request.stream()` looks there first -- so everything downstream,
+    including `form()`, sees a body that was read normally. That equivalence
+    is what `test_csrf_middleware_does_not_eat_the_request_body` checks.
+    """
+    if hasattr(request, "_body"):
+        return request._body
+
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > config.MAX_UPLOAD_BYTES:
+            raise _BodyTooLarge
+        chunks.append(chunk)
+
+    request._body = b"".join(chunks)
+    return request._body
+
+
 async def _submitted_csrf(request: Request) -> str:
     """Pull the CSRF field out of the request body.
 
@@ -259,7 +307,7 @@ async def _submitted_csrf(request: Request) -> str:
     form and fail validation. Verified by
     `test_csrf_middleware_does_not_eat_the_request_body`.
     """
-    body = await request.body()
+    body = await _read_body_capped(request)
     content_type = request.headers.get("content-type", "")
 
     if content_type.startswith("application/x-www-form-urlencoded"):
@@ -359,7 +407,7 @@ async def require_authentication(request: Request, call_next):
                 target = request.url.path
                 if request.url.query:
                     target += "?" + request.url.query
-                return RedirectResponse(f"/login?next={target}", status_code=303)
+                return RedirectResponse(login_url(target), status_code=303)
             return _error_page(
                 request, 401, "Sign in required",
                 "Your session has expired. Sign in and try again.",
@@ -498,7 +546,7 @@ def _error_page(request: Request, code: int, title: str, message: str):
 
 @app.exception_handler(_LoginRedirect)
 async def _needs_login(request: Request, exc: _LoginRedirect):
-    return RedirectResponse(f"/login?next={exc.next}", status_code=303)
+    return RedirectResponse(login_url(exc.next), status_code=303)
 
 
 @app.exception_handler(Forbidden)
@@ -522,8 +570,33 @@ async def _stockroom_error(request: Request, exc: StockroomError):
 
     The destination is taken from Referer, which is attacker-controlled, so it
     goes through safe_path -- otherwise this handler is an open redirect.
+
+    Referer is an *absolute* URL, though, which safe_path refuses outright: it
+    was written for a `next` form field. So this handler always fell back to
+    "/" and quietly bounced people to the dashboard instead of back to the
+    page they were on. Reduce a same-origin Referer to its path and query
+    first, and let safe_path judge that.
     """
-    return redirect(safe_path(request.headers.get("referer", "/")), error=str(exc))
+    return redirect(safe_path(_referer_path(request)), error=str(exc))
+
+
+def _referer_path(request: Request) -> str:
+    """The local path and query of a same-origin Referer, or "".
+
+    Same-origin is decided against the Host this request arrived on, which
+    HostCheckMiddleware has already confirmed is one we answer to -- so a
+    forged Host cannot be used to make a foreign Referer look local here.
+    """
+    referer = request.headers.get("referer", "")
+    if not referer:
+        return ""
+    parsed = urlparse(referer)
+    if parsed.netloc and parsed.netloc.lower() != request.headers.get("host", "").lower():
+        return ""
+    target = parsed.path or "/"
+    if parsed.query:
+        target += "?" + parsed.query
+    return target
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -538,14 +611,22 @@ async def _http_error(request: Request, exc: StarletteHTTPException):
 # ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    """Liveness probe. Public, and deliberately says nothing sensitive."""
+    """Liveness probe. Public, and deliberately says nothing sensitive.
+
+    Counts the items directly rather than through service.summary(), which is
+    six queries -- one of them a full COUNT(*) over the append-only event
+    table -- and was being paid in full on every probe to obtain a single
+    integer.
+    """
     conn = db.connect()
     return JSONResponse(
         {
             "status": "ok",
             "version": __version__,
             "schema_version": db.get_meta(conn, "schema_version"),
-            "item_count": service.summary(conn)["item_count"],
+            "item_count": conn.execute(
+                "SELECT COUNT(*) AS n FROM item WHERE archived_at IS NULL"
+            ).fetchone()["n"],
             # See publish/render.build_payload for why this is public.
             "audit_head": service.audit_head(conn),
         }

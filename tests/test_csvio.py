@@ -95,6 +95,33 @@ def test_export_round_trips(conn, actor):
     assert len(service.list_items(conn)) == 2
 
 
+def test_a_name_that_looks_like_a_formula_is_exported_as_text(conn, actor):
+    """Otherwise the export runs code on the machine that opens it.
+
+    Excel and LibreOffice both execute a cell beginning `=`, `+`, `-` or `@`.
+    Item names are free text and not all of it is staff-written -- a
+    requester's new-item request supplies the name staff create the item from.
+    """
+    service.create_item(conn, actor=actor, name="=HYPERLINK(\"http://evil.test\")",
+                        quantity=1, unit="Unit A", shelf="Shelf 1")
+    exported = csvio.export_csv(conn)
+    row = [l for l in exported.splitlines() if "HYPERLINK" in l][0]
+    assert "'=HYPERLINK" in row, "a formula-leading cell must be quoted as text"
+    assert not row.startswith("=HYPERLINK")
+
+
+def test_defusing_a_formula_survives_the_round_trip(conn, actor):
+    """The apostrophe is display armour, not part of the name."""
+    original = "=1+1"
+    service.create_item(conn, actor=actor, name=original, quantity=1,
+                        unit="Unit A", shelf="Shelf 1")
+    reimported = csvio.import_csv(
+        conn, csvio.export_csv(conn), actor=actor, commit=True
+    )
+    assert reimported.created == []
+    assert original in [i.name for i in service.list_items(conn)]
+
+
 def test_export_reports_live_availability(conn, actor, item, person):
     service.checkout(conn, actor=actor, item_id=item.id, person_id=person.id, quantity=4)
     exported = csvio.export_csv(conn)

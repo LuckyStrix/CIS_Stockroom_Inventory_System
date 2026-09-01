@@ -56,6 +56,19 @@ SystemCallFilter=~@privileged @resources @obsolete
 ReadWritePaths=/var/lib/stockroom
 StateDirectory=stockroom
 
+# The database holds every password hash, every session token hash and every
+# email address in the stockroom. Without these two lines systemd creates the
+# state directory 0755 and Python creates stockroom.db 0644, so any local
+# account on the Pi can read the lot -- security.py reasons carefully about
+# someone stealing the SD card and not at all about someone with a shell.
+#
+# 0750 on the directory and 0027 on new files keeps it to the service user and
+# its group. The publish directory is widened back to 0755 by setup-pi.sh, and
+# the files inside it are chmod'ed 0644 explicitly by publish/publishers.py --
+# nginx serves those, and only those.
+StateDirectoryMode=0750
+UMask=0027
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=stockroom

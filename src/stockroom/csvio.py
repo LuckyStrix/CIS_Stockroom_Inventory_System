@@ -256,13 +256,16 @@ def _find_existing(
 
 def _row_to_fields(row: dict[str, str]) -> dict[str, Any]:
     """Convert one CSV row into keyword arguments for create/update_item."""
+    # _undefuse strips the apostrophe export_csv adds in front of a value that
+    # would otherwise be read as a formula, so a file exported and re-imported
+    # comes back with the name it went out with.
     fields: dict[str, Any] = {
-        "name": row["name"].strip(),
-        "description": row.get("description", "").strip(),
-        "unit": row.get("unit", "").strip(),
-        "shelf": row.get("shelf", "").strip(),
-        "sub_location": row.get("sub_location", "").strip() or None,
-        "product_url": row.get("product_url", "").strip() or None,
+        "name": _undefuse(row["name"].strip()),
+        "description": _undefuse(row.get("description", "").strip()),
+        "unit": _undefuse(row.get("unit", "").strip()),
+        "shelf": _undefuse(row.get("shelf", "").strip()),
+        "sub_location": _undefuse(row.get("sub_location", "").strip()) or None,
+        "product_url": _undefuse(row.get("product_url", "").strip()) or None,
     }
 
     quantity = row.get("quantity", "").strip()
@@ -288,6 +291,36 @@ def _row_to_fields(row: dict[str, str]) -> dict[str, Any]:
     return fields
 
 
+# Characters that make a spreadsheet treat a cell as a formula rather than as
+# text. Excel and LibreOffice both do this, and a formula in a downloaded file
+# runs against the machine of whoever opened it.
+_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _defuse(value: Any) -> Any:
+    """Stop a spreadsheet executing a cell that only looks like a formula.
+
+    Item names and descriptions are free text, and not all of it is written by
+    staff -- a requester's new-item request supplies the name that staff then
+    create the item from. A name of `=HYPERLINK(...)` or a DDE payload is inert
+    everywhere in this application and becomes live the moment somebody opens
+    the export in Excel.
+
+    Prefixing an apostrophe is the standard mitigation: spreadsheets read it as
+    "this cell is text" and do not display it. :func:`_undefuse` takes it back
+    off on import, so the round trip is unchanged -- which
+    test_export_round_trips checks.
+    """
+    if isinstance(value, str) and value.startswith(_FORMULA_LEAD):
+        return "'" + value
+    return value
+
+
+def _undefuse(value: str) -> str:
+    """Remove one leading apostrophe added by :func:`_defuse`."""
+    return value[1:] if value.startswith("'") else value
+
+
 def export_csv(conn: sqlite3.Connection, *, include_archived: bool = False) -> str:
     """Serialize the inventory to CSV. Round-trips with :func:`import_csv`."""
     buffer = io.StringIO()
@@ -296,19 +329,24 @@ def export_csv(conn: sqlite3.Connection, *, include_archived: bool = False) -> s
     for item in list_items(conn, include_archived=include_archived):
         writer.writerow(
             {
-                "name": item.name,
-                "description": item.description,
-                "quantity": item.quantity,
-                "unit": item.unit,
-                "shelf": item.shelf,
-                "sub_location": item.sub_location or "",
-                "barcode": item.barcode or "",
-                "product_url": item.product_url or "",
-                "min_quantity": "" if item.min_quantity is None else item.min_quantity,
-                "available": item.available,
-                "out_qty": item.out_qty,
-                "location": item.location,
-                "status": item.status_label,
+                key: _defuse(value)
+                for key, value in {
+                    "name": item.name,
+                    "description": item.description,
+                    "quantity": item.quantity,
+                    "unit": item.unit,
+                    "shelf": item.shelf,
+                    "sub_location": item.sub_location or "",
+                    "barcode": item.barcode or "",
+                    "product_url": item.product_url or "",
+                    "min_quantity": (
+                        "" if item.min_quantity is None else item.min_quantity
+                    ),
+                    "available": item.available,
+                    "out_qty": item.out_qty,
+                    "location": item.location,
+                    "status": item.status_label,
+                }.items()
             }
         )
     return buffer.getvalue()
