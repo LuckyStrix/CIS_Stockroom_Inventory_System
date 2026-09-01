@@ -63,6 +63,7 @@ from .deps import (
     _LoginRedirect,
     is_public_path,
     login_url,
+    utc_to_local,
     redirect,
     safe_path,
     set_csrf_cookie,
@@ -452,25 +453,20 @@ app.add_middleware(HostCheckMiddleware)
 # ---------------------------------------------------------------------------
 # template filters and globals
 # ---------------------------------------------------------------------------
-def _parse(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
-        try:
-            return datetime.strptime(value, fmt)
-        except ValueError:
-            continue
-    return None
-
-
 def fmt_datetime(value: str | None) -> str:
-    parsed = _parse(value)
-    return parsed.strftime("%d %b %Y, %H:%M") if parsed else "—"
+    """A stored UTC timestamp, printed on the stockroom's own wall clock.
+
+    Everything is stored in UTC and nothing here used to convert it back, so
+    a checkout at 2pm in Rochester was displayed as 18:00 -- correct data,
+    read out in a timezone nobody in the building is standing in.
+    """
+    parsed = utc_to_local(value)
+    return parsed.strftime("%d %b %Y, %H:%M") if parsed else "\u2014"
 
 
 def fmt_date(value: str | None) -> str:
-    parsed = _parse(value)
-    return parsed.strftime("%d %b %Y") if parsed else "—"
+    parsed = utc_to_local(value)
+    return parsed.strftime("%d %b %Y") if parsed else "\u2014"
 
 
 def show(value) -> str:

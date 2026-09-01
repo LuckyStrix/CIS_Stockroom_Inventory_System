@@ -21,6 +21,7 @@ route being added unguarded by accident.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -341,6 +342,66 @@ def safe_path(candidate: str, fallback: str = "/") -> str:
     if "\\" in candidate:
         return fallback
     return candidate
+
+
+def local_to_utc(value: str, *, end: bool = False) -> str | None:
+    """Read a date or datetime typed into a form, in the stockroom's timezone.
+
+    `<input type="datetime-local">` yields "2026-09-03T14:00" and
+    `<input type="date">` yields "2026-09-03". Both are wall-clock times in
+    the building, and everything here is stored in UTC, so they are converted
+    rather than having a Z stapled on -- which is what used to happen, and it
+    made a loan due "Friday" go overdue at 19:59 on Friday afternoon, four
+    hours before the day it was entered for had ended.
+
+    A bare date used as a deadline becomes the end of that local day, so
+    something due Friday is not overdue at midnight on Friday morning.
+
+    Lived in routes_requests as _as_utc, alongside two hand-rolled copies of
+    the end-of-day line in routes_counter and routes_loans. That duplication
+    is why the same bug had to be fixed in three places.
+    """
+    value = (value or "").strip()
+    if not value:
+        return None
+
+    if len(value) == 10:                    # a date with no time
+        stamp = f"{value}T23:59:59" if end else f"{value}T00:00:00"
+    elif len(value) == 16:                  # datetime-local, no seconds
+        stamp = f"{value}:00"
+    elif value.endswith("Z"):
+        return value                        # already UTC: pass it through
+    else:
+        stamp = value
+
+    try:
+        naive = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        # Not a shape we recognise. Returning it unchanged is what this did
+        # before, and the service layer is where a bad value gets rejected.
+        return value
+    return (
+        naive.replace(tzinfo=config.TIMEZONE)
+        .astimezone(timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+
+def utc_to_local(stamp: str | None) -> datetime | None:
+    """Parse a stored UTC timestamp into the stockroom's local time.
+
+    The display half of local_to_utc. Returns None for anything unparseable,
+    so a template filter can print an em dash rather than raising.
+    """
+    if not stamp:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
+        try:
+            parsed = datetime.strptime(stamp, fmt)
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=timezone.utc).astimezone(config.TIMEZONE)
+    return None
 
 
 def login_url(target: str) -> str:

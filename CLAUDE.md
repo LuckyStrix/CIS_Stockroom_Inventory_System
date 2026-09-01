@@ -86,7 +86,13 @@ Other things that are load-bearing:
 - **Python 3.11**, stdlib `sqlite3`, hand-written SQL. No ORM: the dependency
   footprint stays small on a Pi and the audit discipline stays reviewable.
 - **Timestamps** are ISO-8601 UTC strings via `db.utcnow()`. They sort
-  lexicographically, which the overdue query relies on.
+  lexicographically, which the overdue query relies on. UTC is the *storage*
+  format and every comparison stays in it; conversion happens only at the two
+  edges where a human is involved — `deps.local_to_utc()` reads a date typed
+  into a form, `deps.utc_to_local()` (via the `|date` and `|datetime` filters)
+  prints one back. `config.TIMEZONE` is the stockroom's wall clock. Neither
+  edge used to convert at all, so a 2pm checkout displayed as 18:00 and a loan
+  due "Friday" went overdue at 19:59 on Friday afternoon.
 - **Reads** go through the `item_status` view, never the `item` table
   directly — availability is derived and must not be duplicated.
 - **Errors**: raise `ValidationError` (bad input), `ConflictError` (violates

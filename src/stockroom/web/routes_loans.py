@@ -7,7 +7,14 @@ from fastapi.responses import HTMLResponse
 
 from .. import db, service
 from ..service import StockroomError
-from .deps import get_conn, page, redirect, require_staff, safe_path
+from .deps import (
+    get_conn,
+    local_to_utc,
+    page,
+    redirect,
+    require_staff,
+    safe_path,
+)
 
 router = APIRouter()
 
@@ -65,7 +72,7 @@ def checkout(
             quantity=quantity,
             # <input type="date"> gives YYYY-MM-DD; store end-of-day UTC so a
             # loan is not overdue at midnight on the morning it is due.
-            due_at=f"{due_at}T23:59:59Z" if due_at.strip() else None,
+            due_at=local_to_utc(due_at, end=True),
             note=note,
         )
     except StockroomError as exc:

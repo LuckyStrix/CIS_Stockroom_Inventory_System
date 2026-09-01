@@ -12,6 +12,7 @@ from .deps import (
     get_conn,
     page,
     redirect,
+    local_to_utc,
     require_account,
     require_staff,
     safe_path,
@@ -96,7 +97,7 @@ def submit_borrow(
         created = rq.submit_borrow(
             get_conn(), actor=account.as_actor(), requester_id=account.id,
             item_id=item_id, quantity=quantity,
-            needed_from=_as_utc(needed_from), needed_until=_as_utc(needed_until, end=True),
+            needed_from=local_to_utc(needed_from), needed_until=local_to_utc(needed_until, end=True),
             note=note,
         )
     except StockroomError as exc:
@@ -144,7 +145,7 @@ def submit_open_hours(
     try:
         created = rq.submit_open_hours(
             get_conn(), actor=account.as_actor(), requester_id=account.id,
-            window_start=_as_utc(window_start), window_end=_as_utc(window_end),
+            window_start=local_to_utc(window_start), window_end=local_to_utc(window_end),
             purpose=purpose, note=note,
         )
     except StockroomError as exc:
@@ -220,7 +221,7 @@ def fulfil(request: Request, request_id: int, quantity: str = Form(""),
         rq.fulfil_borrow(
             get_conn(), actor=staff.as_actor(), request_id=request_id,
             quantity=int(quantity) if quantity.strip() else None,
-            due_at=_as_utc(due_at, end=True),
+            due_at=local_to_utc(due_at, end=True),
         )
     except (StockroomError, ValueError) as exc:
         return redirect(f"/requests/{request_id}", error=str(exc))
@@ -249,8 +250,8 @@ def add_open_hours(request: Request, window_start: str = Form(...),
     staff = require_staff(request)
     try:
         rq.add_open_hours(get_conn(), actor=staff.as_actor(),
-                          window_start=_as_utc(window_start),
-                          window_end=_as_utc(window_end), note=note)
+                          window_start=local_to_utc(window_start),
+                          window_end=local_to_utc(window_end), note=note)
     except StockroomError as exc:
         return redirect("/requests", error=str(exc))
     return redirect("/requests", ok="Open hours published.")
@@ -277,23 +278,3 @@ def _check_limit(account_id: int) -> None:
             "You have filed a lot of requests in the last hour. "
             "Please wait a little before submitting more."
         )
-
-
-def _as_utc(value: str, *, end: bool = False) -> str | None:
-    """Turn a browser datetime-local / date value into the stored UTC format.
-
-    `<input type="datetime-local">` yields "2026-09-03T14:00" and
-    `<input type="date">` yields "2026-09-03". Both are naive local times; the
-    stockroom is one building in one timezone, so they are stored as given
-    with a Z suffix rather than pretending to a precision the form does not
-    carry. A bare date used as a deadline becomes end-of-day, so something due
-    "Friday" is not overdue at midnight on Friday morning.
-    """
-    value = (value or "").strip()
-    if not value:
-        return None
-    if len(value) == 10:            # a date with no time
-        return f"{value}T23:59:59Z" if end else f"{value}T00:00:00Z"
-    if len(value) == 16:            # datetime-local, no seconds
-        return f"{value}:00Z"
-    return value if value.endswith("Z") else f"{value}Z"

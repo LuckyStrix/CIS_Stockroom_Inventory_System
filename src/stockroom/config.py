@@ -19,6 +19,9 @@ Environment variables (all optional):
     STOCKROOM_GITHUB_PAGES_DIR        enable the GitHub Pages mirror by pointing
                                       this at a local clone of the Pages repo
     STOCKROOM_GITHUB_PAGES_BRANCH     branch to commit to (default "main")
+    STOCKROOM_TIMEZONE                the stockroom's wall clock, for reading
+                                      typed dates and printing stored ones
+                                      (default America/New_York)
     STOCKROOM_BARCODE_PREFIX          default "CIS"
     STOCKROOM_PUBLISH_DEBOUNCE        seconds to coalesce republishes (default 2.0)
     STOCKROOM_ALLOWED_HOSTS           comma-separated Host values to accept
@@ -198,6 +201,39 @@ ALLOWED_HOSTS: list[str] = _allowed_hosts(
 # for a forged IP to poison. Names still have to be on the list, and setting
 # this to "0" restores the stricter behaviour.
 ALLOW_IP_HOSTS: bool = _env_bool("STOCKROOM_ALLOW_IP_HOSTS", True)
+
+# The stockroom's own wall clock.
+#
+# Everything is STORED in UTC and that does not change -- the timestamps sort
+# lexicographically, which the overdue query relies on. This is the timezone
+# used at the two boundaries where a human is involved: reading a date typed
+# into a form, and printing a stored one back onto a page.
+#
+# Without it the two were simply skipped, in opposite directions. A time the
+# system generated was true UTC and displayed as though it were local, so a
+# checkout at 2pm read as 18:00. A date somebody typed was local and got a Z
+# stapled to it, so "due Friday" became 23:59:59Z on Friday -- 19:59 in
+# Rochester -- and the loan went overdue while the building was still open.
+#
+# An unknown zone name would otherwise raise at import and take the service
+# down at boot, which is a poor trade for a setting almost nobody will change.
+def _load_timezone(name: str):
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        import logging
+
+        logging.getLogger("stockroom").warning(
+            "Unknown STOCKROOM_TIMEZONE %r; falling back to America/New_York. "
+            "Use a tz database name such as America/New_York.", name,
+        )
+        return ZoneInfo("America/New_York")
+
+
+TIMEZONE_NAME: str = os.environ.get("STOCKROOM_TIMEZONE", "America/New_York")
+TIMEZONE = _load_timezone(TIMEZONE_NAME)
 
 BARCODE_PREFIX: str = os.environ.get("STOCKROOM_BARCODE_PREFIX", "CIS")
 BARCODE_DIGITS: int = 6  # CIS-000142
