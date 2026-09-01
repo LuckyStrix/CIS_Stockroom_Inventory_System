@@ -99,8 +99,6 @@ def test_an_unknown_timezone_falls_back_instead_of_killing_the_service(caplog):
 def test_a_loan_due_today_is_not_overdue_until_the_local_day_ends(conn, actor,
                                                                  item, person):
     """The end-to-end version: the arithmetic that sent the wrong chasers."""
-    from stockroom import db
-
     due = local_to_utc("2026-09-03", end=True)
     loan = service.checkout(conn, actor=actor, item_id=item.id,
                             person_id=person.id, quantity=1, due_at=due)
