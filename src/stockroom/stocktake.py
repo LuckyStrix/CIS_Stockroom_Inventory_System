@@ -356,9 +356,13 @@ def record_scan(
     """Record one thing seen on the shelf. Returns the session and a message.
 
     Accepts a scanned code -- an item barcode or a unit's asset tag -- or an
-    explicit item. Scanning the same thing again adds to its count rather than
-    creating a second row, so walking a shelf and scanning six SD card boxes
-    reads as six, not as six conflicting rows saying one.
+    explicit item.
+
+    The two kinds of scan count in opposite ways, which is the whole subtlety
+    here. Scanning an item barcode six times means six of them are on the
+    shelf, so the scans accumulate. Scanning one asset tag six times means one
+    camera was passed under the scanner six times, so it stays one -- a
+    physical object cannot be present twice.
     """
     with db.transaction(conn):
         session = get_stocktake(conn, stocktake_id)
@@ -385,13 +389,25 @@ def record_scan(
                 unit_id, quantity = unit.id, 1
 
         item = get_item(conn, item_id)
+        # This upsert's DO UPDATE branch is reached ONLY for asset-tag scans.
+        # SQLite treats NULLs as distinct in a UNIQUE index, so a countable
+        # scan (unit_id NULL) never conflicts and always inserts a new row --
+        # six boxes of cards are six rows of one, which scan_counts sums back
+        # to six. That is correct, and it is why the totals were always right.
+        #
+        # A unit scan is the opposite case. An asset tag names one physical
+        # object, so scanning it twice is the same camera seen twice, not two
+        # cameras: the count is 1 however many times it is scanned. Adding
+        # here instead reported a phantom extra body in the `over` list, and
+        # double-scanning while walking a room with a scanner is the likeliest
+        # operator error there is.
         conn.execute(
             """
             INSERT INTO stocktake_scan (stocktake_id, item_id, unit_id,
                                         quantity, scanned_at, scanned_by)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT (stocktake_id, item_id, unit_id) DO UPDATE
-                SET quantity = quantity + excluded.quantity,
+                SET quantity = 1,
                     scanned_at = excluded.scanned_at
             """,
             (stocktake_id, item_id, unit_id, quantity, db.utcnow(), str(actor)),

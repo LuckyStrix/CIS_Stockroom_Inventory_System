@@ -161,6 +161,56 @@ def test_an_asset_tag_counts_its_item(conn, actor):
     assert stocktake.scan_counts(conn, session.id)[camera.id] == 1
 
 
+def test_scanning_one_asset_tag_twice_still_counts_one(conn, actor):
+    """A physical object cannot be on the shelf twice.
+
+    The two kinds of scan count in opposite directions: six scans of a card
+    box are six boxes, but six scans of one camera's asset tag are one camera
+    passed under the scanner six times. Adding them reported a body the
+    stockroom did not own, and double-scanning while walking a room is the
+    likeliest operator error there is.
+    """
+    camera = service.create_item(conn, actor=actor, name="Canon EOS R5",
+                                 quantity=1, tracked=True)
+    service.create_unit(conn, actor=actor, item_id=camera.id, asset_tag="CIS-U-9")
+
+    session = stocktake.start_stocktake(conn, actor=actor)
+    for _ in range(3):
+        stocktake.record_scan(conn, actor=actor, stocktake_id=session.id,
+                              code="CIS-U-9")
+
+    assert stocktake.scan_counts(conn, session.id)[camera.id] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM stocktake_scan WHERE stocktake_id = ?",
+        (session.id,),
+    ).fetchone()[0] == 1, "a re-scanned unit must not open a second row"
+    # And therefore no phantom surplus in the report.
+    assert stocktake.reconcile(conn, session.id).over == []
+
+
+def test_two_units_of_one_item_are_two(conn, actor):
+    """The dedup is per object, not per item -- two bodies really are two."""
+    camera = service.create_item(conn, actor=actor, name="Canon EOS R5",
+                                 quantity=2, tracked=True)
+    for tag in ("CIS-U-1", "CIS-U-2"):
+        service.create_unit(conn, actor=actor, item_id=camera.id, asset_tag=tag)
+
+    session = stocktake.start_stocktake(conn, actor=actor)
+    for tag in ("CIS-U-1", "CIS-U-2", "CIS-U-1"):
+        stocktake.record_scan(conn, actor=actor, stocktake_id=session.id, code=tag)
+
+    assert stocktake.scan_counts(conn, session.id)[camera.id] == 2
+
+
+def test_scanning_a_countable_barcode_still_accumulates(conn, actor, shelf):
+    """The other half of the rule, which the unit fix must not disturb."""
+    session = stocktake.start_stocktake(conn, actor=actor)
+    for _ in range(6):
+        stocktake.record_scan(conn, actor=actor, stocktake_id=session.id,
+                              code=shelf["cards"].barcode)
+    assert stocktake.scan_counts(conn, session.id)[shelf["cards"].id] == 6
+
+
 def test_scanning_something_unknown_says_it_may_never_have_been_entered(conn,
                                                                         actor):
     session = stocktake.start_stocktake(conn, actor=actor)

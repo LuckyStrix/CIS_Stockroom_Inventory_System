@@ -461,8 +461,19 @@ CREATE TABLE IF NOT EXISTS stocktake_scan (
     scanned_at   TEXT    NOT NULL,
     scanned_by   TEXT    NOT NULL,
 
-    -- Scanning the same thing twice adds to the count rather than making a
-    -- second row, so this is genuinely one row per thing counted.
+    -- Deduplicates ASSET-TAG scans only, and that is deliberate rather than a
+    -- shortfall. SQLite treats NULLs as distinct in a UNIQUE index, so a row
+    -- with unit_id NULL never conflicts: scanning a countable item's barcode
+    -- six times writes six rows of one, which is right, because six boxes of
+    -- cards really are on the shelf. scan_counts sums them.
+    --
+    -- A unit scan does conflict, and must: an asset tag names one physical
+    -- object, so scanning it twice is one camera seen twice. stocktake.
+    -- record_scan's ON CONFLICT targets these three columns and resets the
+    -- quantity to 1 for exactly that reason -- do not "fix" this constraint
+    -- to cover the NULL case without reading that comment first, and note
+    -- that ON CONFLICT raises at prepare time if its target stops matching a
+    -- real constraint.
     UNIQUE (stocktake_id, item_id, unit_id)
 );
 
