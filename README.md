@@ -39,6 +39,9 @@ every change.
   unaccounted for".
 - **Work a counter queue** — scan a whole basket, or a saved kit, and check it
   all out to one person in a single transaction. Returns work the same way.
+- **Photograph the confusing ones** — "is this the right cable?" is a photo
+  question. Uploads are downscaled and stripped of EXIF on the way in; they
+  stay internal and never reach the public page.
 - **Count the shelves** — a stocktake walks the room with a scanner and reports
   where the shelves and the database disagree. It is the only thing that
   catches drift, because drift never went through the counter.
@@ -78,6 +81,10 @@ Full walkthrough from a blank SD card, including the scanner and the label
 printer: **[docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md)**.
 
 ## The command line
+
+On the Pi this is `/usr/local/bin/stockroom`, installed by `setup-pi.sh`: a
+wrapper that runs the real CLI as the `stockroom` service account. In a
+checkout it is `.venv/bin/stockroom`.
 
 ```bash
 stockroom status                 # headline numbers

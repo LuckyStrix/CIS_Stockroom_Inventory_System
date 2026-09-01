@@ -19,8 +19,8 @@ the change and its `event` row commit together:
 - a history entry cannot describe a change that rolled back.
 
 `tests/test_audit.py` enforces it. `test_no_mutating_function_is_missing_from_the_table`
-fails if a new mutating function is added to `service.py` without being
-audit-tested, so the rule survives future work rather than depending on
+scans all five modules and fails if any function taking an `actor: Actor` is
+not audit-tested, so the rule survives future work rather than depending on
 someone remembering it.
 
 ## Layers
@@ -75,9 +75,16 @@ someone remembering it.
 ### Availability is derived, never stored
 
 `item.quantity` is the total owned. What is *available* is computed by the
-`item_status` view as `quantity - SUM(open loan quantities)`. There is no
-`available` column, so it cannot drift out of step with the loan table. Every
-read path uses the view.
+`item_status` view:
+
+```
+available = quantity - units on loan - units held out of service
+```
+
+Both subtractions matter. A broken or missing unit is an open `item_hold` row,
+not a quantity edit, so the shelf can still say "we own ten, two are
+unaccounted for". There is no `available` column, so it cannot drift out of
+step with either table. Every read path uses the view.
 
 ### `BEGIN IMMEDIATE` on every write
 

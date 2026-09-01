@@ -186,7 +186,7 @@ These are real, and none of them is fixed by more code:
    that expensive is that the head hash is copied outside the Pi — into
    `inventory.json`, into `/health`, and into every nightly snapshot — so a
    convincing rewrite means finding and rewriting all of those too.
-5. **Someone has to own this.** Unapplied patches eight months from now, a
+7. **Someone has to own this.** Unapplied patches eight months from now, a
    reboot nobody performed, the person who set it up graduating: these are the
    realistic ways this system dies. Put a name and a monthly check in the
    stockroom's own records.
@@ -195,14 +195,14 @@ These are real, and none of them is fixed by more code:
 
 ```bash
 # Who has been signing in, and who has been failing?
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom history --action auth.login
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom history --action auth.login_failed
+stockroom history --action auth.login
+stockroom history --action auth.login_failed
 
 # Cut off one account immediately.
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom user disable someone@rit.edu
+stockroom user disable someone@rit.edu
 
 # Sign an account out everywhere without disabling it.
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom sessions revoke someone@rit.edu
+stockroom sessions revoke someone@rit.edu
 
 # Take the service off the network while you investigate. The database and
 # the audit log are untouched by this.

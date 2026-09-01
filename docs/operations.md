@@ -12,7 +12,7 @@ people when you approve them, is in
 The first administrator must be created from a shell on the Pi:
 
 ```bash
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom user create \
+stockroom user create \
     --first-name Your --last-name Name --email you@rit.edu --admin
 ```
 
@@ -42,6 +42,20 @@ its whole contents in with one click.
 
 **Counter → Returns** does the same in reverse: pick the person, untick
 anything they are keeping, and hand back the rest in one go.
+
+### Save a kit
+
+**Kits.** A kit is a named list of items that habitually go out together — a
+camera, its charger, two batteries and a card. Build one once, and the counter
+drops the whole list into the basket with one click.
+
+Nothing is ever lent "as a kit". The lines are expanded into ordinary basket
+rows and the kit is then forgotten, so a borrower who does not need the tripod
+can have it removed before checkout, and each line returns on its own. That
+also means a kit naming something out of stock is not an error — the basket
+just shows what could not be added.
+
+Kits are archived rather than deleted, like items.
 
 Something that comes back damaged is better returned from the item page or
 with the condition dropdown on the return row, so the fault is recorded
@@ -82,6 +96,54 @@ including whether any of them are leaving the machine.
 (scan the manufacturer's barcode into the field to use that instead). Then
 print its label from the item page.
 
+### Add a photo
+
+On the item page, **Add a photo**. "Is this the right cable?" is a photo
+question, and a picture of the connector answers it better than any
+description will.
+
+Uploads are re-encoded on the way in: decoded, downscaled to 1600px on the
+longest edge, stripped of EXIF and written out as a fresh JPEG
+(`STOCKROOM_PHOTO_MAX_PIXELS` if that is the wrong size). A phone photo
+arrives at 3-5 MB and lands around 200 KB, which matters on an SD card — and
+re-encoding is also what removes the GPS coordinates a phone attaches.
+
+The first photo becomes the main one; **Make main** changes that. Photos are
+internal only — they are never copied onto the public page, which stays a
+single self-contained file with no asset directory.
+
+Photo files live in `PHOTO_DIR` (`/var/lib/stockroom/photos`), *not* in the
+database, so they are not in the nightly snapshot. Back them up separately if
+they matter to you.
+
+### Track individual units
+
+Most of the stockroom is countable and needs none of this. But where it
+matters *which* body came back with a bent mount, mark the item tracked and
+**Register a unit** for each physical object, giving each one its own asset
+tag — a scannable code separate from the item barcode. Scanning the item says
+*what*; scanning the tag says *which one*.
+
+Checkout can then name the unit, and its faults, repairs and history follow
+that object rather than the pile. **Retire** a unit that has left the building
+for good.
+
+A unit loan is quantity 1 by definition, so it can never be partially
+returned, and one unit cannot be lent to two people even where the arithmetic
+would allow it.
+
+### See what the year adds up to
+
+**Reports.** Most borrowed, never borrowed, typical time out, busiest weeks,
+busiest borrowers, returned late most often, unaccounted for, and what is
+waiting on a repair. The window is a year by default — `?days=` on the page,
+`--days` on the CLI.
+
+This is the material for "what should we buy next?" — and the
+never-borrowed list is the one that argues for shelf space back. The charts
+are server-rendered SVG rather than a charting library, because the CSP
+forbids loading one.
+
 ### Retire an item
 
 **Archive** it. Archived items disappear from the lists and the public page but
@@ -90,33 +152,47 @@ with units still out cannot be archived — get them back first.
 
 ## The command line
 
-Run as the service user so file ownership stays correct:
+`setup-pi.sh` installs `/usr/local/bin/stockroom`, so the command is just
+`stockroom` on the Pi. It is a wrapper: the real CLI is in the venv at
+`/opt/stockroom/.venv/bin/stockroom`, which is on nobody's `PATH`, and it has
+to run as the `stockroom` service user — running it as root leaves a
+root-owned WAL beside the database and the service then fails every write with
+`attempt to write a readonly database`. The wrapper does the `sudo -u` for
+you, so it will ask for *your* password.
+
+Aliases do not expand in non-interactive shells, and neither `/usr/local/bin`
+nor the wrapper's `sudo` is a safe assumption inside a systemd unit: write the
+full `/opt/stockroom/.venv/bin/stockroom` path there, as
+`deploy/stockroom-backup.service` does.
 
 ```bash
-S="sudo -u stockroom /opt/stockroom/.venv/bin/stockroom"
+stockroom status                      # headline numbers
+stockroom items --low                 # what needs reordering
+stockroom items --out                 # what is lent out
+stockroom loans --overdue             # chase list
+stockroom history --item 12           # one item's full history
+stockroom checkout CIS-000142 alice@rit.edu --qty 2
+stockroom return 45 --qty 1           # partial return of loan 45
+stockroom export > /tmp/stock.csv     # CSV snapshot
+stockroom publish                     # rebuild the public page now
+stockroom backup                      # snapshot the database now
+stockroom prune                       # drop expired sessions and old login attempts
+stockroom doctor                      # health checks; non-zero if something is wrong
+stockroom report --days 365           # usage figures, same numbers as /reports
 
-$S status                      # headline numbers
-$S items --low                 # what needs reordering
-$S items --out                 # what is lent out
-$S loans --overdue             # chase list
-$S history --item 12           # one item's full history
-$S checkout CIS-000142 alice@rit.edu --qty 2
-$S return 45 --qty 1           # partial return of loan 45
-$S export > /tmp/stock.csv     # CSV snapshot
-$S publish                     # rebuild the public page now
-$S backup                      # snapshot the database now
-$S prune                       # drop expired sessions and old login attempts
-
-$S user list                   # accounts, pending first
-$S user approve an1234@rit.edu
-$S user role an1234@rit.edu staff
-$S user disable an1234@rit.edu # --enable to reverse
-$S user passwd an1234@rit.edu  # reset a password; revokes their sessions
-$S sessions revoke an1234@rit.edu
+stockroom user list                   # accounts, pending first
+stockroom user approve an1234@rit.edu
+stockroom user role an1234@rit.edu staff
+stockroom user disable an1234@rit.edu # --enable to reverse
+stockroom user passwd an1234@rit.edu  # reset a password; revokes their sessions
+stockroom sessions revoke an1234@rit.edu
 ```
 
 Every mutating command takes `--actor "Name <email>"`, which is what lands in
-the audit log. Without it, changes are attributed to `cli:<unix user>`.
+the audit log. **Pass it.** Without it the change is attributed to
+`cli:<unix user>`, and since the command runs as the service user either way,
+that is `cli:stockroom` for everyone who has a shell on the Pi — which
+identifies nobody.
 
 ## Configuration
 
@@ -202,7 +278,7 @@ as the service user, because that is where the app expects the config:
 ```bash
 sudo apt install rclone
 sudo -u stockroom rclone config          # create the remote, do the OAuth
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom backup
+stockroom backup
 ```
 
 ```bash
@@ -249,7 +325,7 @@ sudo systemctl stop stockroom
 sudo -u stockroom cp /var/lib/stockroom/backups/stockroom-<timestamp>.db \
                      /var/lib/stockroom/stockroom.db
 sudo systemctl start stockroom
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom publish
+stockroom publish
 ```
 
 The CSV export is a second, format-independent safety net — it is readable by
@@ -275,7 +351,7 @@ curl -s localhost:8000/health
 If `/health` answers on the Pi but not from your laptop, it is the network or
 mDNS — try the IP address directly.
 
-**The public page is stale or missing.** Regenerate it: `$S publish`. If that
+**The public page is stale or missing.** Regenerate it: `stockroom publish`. If that
 works but automatic updates do not, look for `publish failed` in
 `journalctl -u stockroom`. The most common cause is the optional GitHub Pages
 publisher failing to push; the local page still updates, because publishing
@@ -312,10 +388,12 @@ Reprint at exactly 100% with page scaling off, and check the printer is not
 in a draft/toner-saving mode.
 
 **Availability looks wrong.** It is derived, not stored, so it cannot drift:
-`available = quantity − sum(open loans)`. If it reads low, something is still
-checked out — the item page lists exactly who has what. If someone lost an
-item, return the loan with a note and then reduce the total quantity; both
-steps are recorded.
+`available = quantity − units on loan − units held out of service`. If it
+reads low, either something is still checked out — the item page lists exactly
+who has what — or a unit is on hold as broken, in repair, missing or written
+off, which the item page also shows. Note that a hold deliberately does *not*
+reduce `quantity`: "we own ten, two are unaccounted for" is the sentence that
+gets a replacement funded.
 
 ## Inspecting the database by hand
 
@@ -340,8 +418,8 @@ nmap -Pn cis-stockroom.local
 sudo ss -ltnp | grep 8000
 
 # Who has been signing in, and failing?
-$S history --action auth.login
-$S history --action auth.login_failed
+stockroom history --action auth.login
+stockroom history --action auth.login_failed
 
 # Are security updates actually being applied?
 sudo unattended-upgrade --dry-run --debug 2>&1 | tail -5

@@ -101,7 +101,9 @@ Two steps the installer deliberately does not do for you.
 
 ```bash
 # There is no way to make an admin over the network. This is on purpose.
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom user create \
+# `stockroom` here is /usr/local/bin/stockroom, which setup-pi.sh installed;
+# it runs the CLI as the service account and will ask for your password.
+stockroom user create \
     --first-name Your --last-name Name --email you@rit.edu --admin
 
 # Firewall, key-only SSH, automatic security updates, fail2ban.
@@ -126,9 +128,9 @@ you to approve them.
 
 ```bash
 # Copy your spreadsheet over as CSV first, then:
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom import stock.csv
+stockroom import stock.csv
 # Nothing is written yet. Read the report, then:
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom import stock.csv --commit
+stockroom import stock.csv --commit
 ```
 
 Columns: `name, description, quantity, unit, shelf, sub_location, barcode,
@@ -145,7 +147,7 @@ Test it: open the dashboard, scan a label, and the page should jump to that
 item. The search box is focused automatically for this reason, so scanning
 works the moment the page loads.
 
-Print labels for everything from `http://cis-stockroom.local:8000/labels`.
+Print labels for everything from `https://cis-stockroom.local/labels`.
 The sheet is laid out for Avery 5160 (3 × 10, 2.625" × 1"). **Print at 100%
 scale with page scaling off** — a scaled barcode may not scan.
 

@@ -99,12 +99,39 @@ One row per change, written in the same transaction as the change.
 | `summary` | Human-readable one-liner shown in the UI |
 | `changes_json` | `{"shelf": {"from": "3", "to": "1"}}` |
 
-Actions: `item.create`, `item.update`, `item.relocate`, `item.quantity_adjust`,
-`item.archive`, `item.restore`, `person.create`, `person.update`,
-`loan.checkout`, `loan.return`, `loan.partial_return`, `import.run`.
+Every action name, grouped by what it touches. The **History** page filters on
+these, and so does `stockroom history --action`.
 
-`update_item` picks the most specific action that fits, so a pure location
-change reads as `item.relocate` and the history can be filtered meaningfully.
+| Group | Actions |
+|---|---|
+| Items | `item.create`, `item.update`, `item.relocate`, `item.quantity_adjust`, `item.archive`, `item.restore` |
+| Condition | `item.hold_open`, `item.hold_change`, `item.hold_close` |
+| Photos | `item.photo_add`, `item.photo_primary`, `item.photo_remove` |
+| Units | `unit.create`, `unit.update`, `unit.retire` |
+| People | `person.create`, `person.update`, `person.merge` |
+| Loans | `loan.checkout`, `loan.checkout_batch`, `loan.return`, `loan.partial_return`, `loan.return_batch` |
+| Kits | `kit.create`, `kit.update`, `kit.contents`, `kit.archive`, `kit.restore` |
+| Stocktakes | `stocktake.start`, `stocktake.finish`, `stocktake.abandon` |
+| Accounts | `account.register`, `account.approve`, `account.decline`, `account.disable`, `account.status_change`, `account.role_change`, `account.password_change` |
+| Sessions | `auth.login`, `auth.login_failed`, `auth.logout`, `auth.lockout`, `auth.sessions_revoked` |
+| Requests | `request.create`, `request.approve`, `request.decline`, `request.cancel`, `request.fulfil` |
+| Open hours | `open_hours.create`, `open_hours.cancel` |
+| Bulk | `import.run` |
+
+Several of these are chosen at write time rather than fixed at the call site,
+so the history can be filtered meaningfully:
+
+- `update_item` picks the most specific action that fits, so a pure location
+  change reads as `item.relocate` rather than a generic `item.update`;
+- a return is `loan.partial_return` when units remain out and `loan.return`
+  when none do;
+- disabling an account is `account.decline` while it is still `pending` and
+  `account.disable` once it is active — declining a signup and cutting off a
+  colleague are different events and should not read alike.
+
+The `auth.*` rows are the reason the login page can give one deliberately
+vague message to everybody: the real reason a sign-in failed is recorded here
+instead.
 
 ### Phase 3: units, condition, kits, counts and photos
 
@@ -135,8 +162,15 @@ silent. See `service.log_event` and `service.verify_audit_chain`.
 ### `item_status` — item plus derived availability
 
 ```sql
-available = quantity - COALESCE(SUM(open loan quantities), 0)
+available = quantity
+          - COALESCE(SUM(open loan quantities), 0)
+          - COALESCE(SUM(open hold quantities), 0)
 ```
+
+The view also exposes `out_qty`, `held_qty`, `open_loan_count`, and
+`unaccounted_qty` — the subset of holds in state `missing` or `gone`, which is
+the number worth putting on a dashboard, because a broken or in-repair unit is
+one somebody can still point at.
 
 Every read path uses this rather than the `item` table. Availability is
 computed, never a stored column — so it cannot disagree with the loans.

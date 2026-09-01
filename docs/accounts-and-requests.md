@@ -25,7 +25,7 @@ Made from a shell on the Pi. There is deliberately no way to do it over the
 network:
 
 ```bash
-sudo -u stockroom /opt/stockroom/.venv/bin/stockroom user create \
+stockroom user create \
     --first-name Your --last-name Name --email you@rit.edu --admin
 ```
 
@@ -109,16 +109,19 @@ Every one of those actions is recorded against your name in **History**.
 Useful when the browser is inconvenient, or from a script:
 
 ```bash
-S="sudo -u stockroom /opt/stockroom/.venv/bin/stockroom"
-
-$S user list                       # everyone, pending first
-$S user list --status pending      # just the queue
-$S user approve an1234@rit.edu
-$S user role an1234@rit.edu staff
-$S user disable an1234@rit.edu     # --enable to reverse
-$S user passwd an1234@rit.edu      # prompts; revokes their sessions
-$S sessions revoke an1234@rit.edu  # sign out everywhere, keep the account
+stockroom user list                       # everyone, pending first
+stockroom user list --status pending      # just the queue
+stockroom user approve an1234@rit.edu
+stockroom user role an1234@rit.edu staff
+stockroom user disable an1234@rit.edu     # --enable to reverse
+stockroom user passwd an1234@rit.edu      # prompts; revokes their sessions
+stockroom sessions revoke an1234@rit.edu  # sign out everywhere, keep the account
 ```
+
+On the Pi that is `/usr/local/bin/stockroom`, which runs the real CLI as the
+service account — see [operations.md](operations.md#the-command-line). Add
+`--actor "Your Name <you@rit.edu>"`, or the audit log records the change
+against the service account instead of you.
 
 ## Things people ask
 
