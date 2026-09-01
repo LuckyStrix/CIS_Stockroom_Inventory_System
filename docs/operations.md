@@ -134,6 +134,14 @@ STOCKROOM_ORG=Carlson Center for Imaging Science — RIT     # breaks the instal
 
 `sudo systemctl restart stockroom` after editing it.
 
+The `stockroom` CLI reads the same file, so a command run by hand uses the same
+database and directories as the service. It has to: nothing hands a `sudo -u
+stockroom stockroom ...` invocation an environment, and before it did, the CLI
+fell back to its development defaults under `/opt/stockroom/data` and failed
+with `PermissionError: [Errno 13] Permission denied: '/opt/stockroom/data'`.
+Point it somewhere else for a one-off with `STOCKROOM_ENV_FILE=`, or by setting
+the variable itself — a real environment variable always beats the file.
+
 ## Backups
 
 A snapshot is taken nightly at 02:30 into `/var/lib/stockroom/backups`, and

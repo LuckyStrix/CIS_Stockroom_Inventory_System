@@ -317,3 +317,115 @@ def test_top_level_excludes_are_anchored():
         "Anchor them with a leading slash unless they are genuinely meant to "
         "match everywhere."
     )
+
+
+# ---------------------------------------------------------------------------
+# the CLI reads the same settings the service does
+# ---------------------------------------------------------------------------
+#
+# Another real failure. `stockroom user create --admin` -- the command
+# setup-pi.sh prints as the required next step -- got no environment, fell back
+# to <repo root>/data and died with
+#
+#     PermissionError: [Errno 13] Permission denied: '/opt/stockroom/data'
+#
+# config.py now parses /etc/stockroom.env itself, which means it is a second
+# implementation of the grammar setup-pi.sh's load_env_file() implements in
+# shell. These check it, and check the two agree.
+
+
+@pytest.fixture
+def clean_environ(monkeypatch):
+    """os.environ, restored afterwards -- _load_env_file mutates it."""
+    import os
+
+    for key in [k for k in os.environ if k.startswith("STOCKROOM_")]:
+        monkeypatch.delenv(key)
+    return os.environ
+
+
+def test_config_reads_the_env_file(tmp_path, clean_environ):
+    from stockroom import config
+
+    env = tmp_path / "stockroom.env"
+    env.write_text('STOCKROOM_DATA_DIR="/var/lib/stockroom"\n')
+    config._load_env_file(env)
+    assert clean_environ["STOCKROOM_DATA_DIR"] == "/var/lib/stockroom"
+
+
+def test_config_defaults_to_the_installed_env_file():
+    """The path systemd uses. Changing it silently unfixes the bug above."""
+    from stockroom import config
+
+    assert str(config.ENV_FILE) == "/etc/stockroom.env"
+
+
+def test_a_real_environment_variable_wins_over_the_file(tmp_path, clean_environ):
+    """systemd and the test suite stay authoritative; the file only fills in."""
+    from stockroom import config
+
+    clean_environ["STOCKROOM_DATA_DIR"] = "/somewhere/else"
+    env = tmp_path / "stockroom.env"
+    env.write_text('STOCKROOM_DATA_DIR="/var/lib/stockroom"\n')
+    config._load_env_file(env)
+    assert clean_environ["STOCKROOM_DATA_DIR"] == "/somewhere/else"
+
+
+def test_a_missing_env_file_is_not_an_error(tmp_path, clean_environ):
+    """Development, and the CI that runs this suite, have no /etc file."""
+    from stockroom import config
+
+    config._load_env_file(tmp_path / "nope.env")  # must not raise
+
+
+def test_config_executes_nothing_in_the_env_file(tmp_path, clean_environ):
+    """It reads a root-owned file in /etc; it must never run it."""
+    from stockroom import config
+
+    canary = tmp_path / "EXECUTED"
+    env = tmp_path / "hostile.env"
+    env.write_text(f"STOCKROOM_ORG=fine\n$(touch {canary})\n`touch {canary}`\n")
+    config._load_env_file(env)
+    assert not canary.exists()
+    assert clean_environ["STOCKROOM_ORG"] == "fine"
+
+
+def test_both_parsers_read_the_env_file_the_same_way(tmp_path, clean_environ):
+    """config.py in Python and setup-pi.sh in bash must not drift apart."""
+    from stockroom import config
+
+    awkward = tmp_path / "awkward.env"
+    awkward.write_text(
+        "# a comment\n"
+        "\n"
+        "STOCKROOM_ORG=Carlson Center for Imaging Science — RIT\n"
+        'STOCKROOM_DATA_DIR="/var/lib/stockroom"\n'
+        "STOCKROOM_PUBLISH_DIR='/var/lib/stockroom/publish'\n"
+        "STOCKROOM_BACKUP_KEEP=30\n"
+        "not an assignment\n"
+    )
+    keys = ["STOCKROOM_ORG", "STOCKROOM_DATA_DIR", "STOCKROOM_PUBLISH_DIR",
+            "STOCKROOM_BACKUP_KEEP"]
+
+    parser = re.search(r"^load_env_file\(\) \{.*?^\}",
+                       (_DEPLOY / "setup-pi.sh").read_text(), re.M | re.S).group(0)
+    script = tmp_path / "parser.sh"
+    script.write_text(parser)
+    args = " ".join(f'"${k}"' for k in keys)  # space: `|` here would be a pipe
+    result = subprocess.run(
+        ["bash", "-c",
+         f'. "{script}"; load_env_file "{awkward}"; printf "%s|%s|%s|%s" {args}'],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+    config._load_env_file(awkward)
+    assert [clean_environ[k] for k in keys] == result.stdout.split("|")
+
+
+def test_the_installer_tells_the_operator_to_run_the_cli_as_the_service_user():
+    """Running it as root would write a root-owned WAL beside the database."""
+    body = (_DEPLOY / "setup-pi.sh").read_text()
+    for line in body.splitlines():
+        if "/.venv/bin/stockroom" in line and "sudo" in line:
+            assert "sudo -u" in line, f"runs the CLI as root: {line.strip()}"

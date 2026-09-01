@@ -122,7 +122,7 @@ The phase 2 and phase 3 additions are listed below; the short version is that
 ## Testing
 
 ```bash
-.venv/bin/pytest              # 601 tests, ~2min
+.venv/bin/pytest              # 636 tests, ~4min
 ```
 
 `tests/test_web.py` drives real HTTP requests through the actual routes and

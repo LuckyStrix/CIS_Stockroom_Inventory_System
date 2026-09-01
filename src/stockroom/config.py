@@ -4,8 +4,13 @@ Everything is a plain module-level default that can be overridden with an
 environment variable, so the Pi's systemd unit can configure the service
 without editing code and the test suite can point at a temp directory.
 
+Anything not already in the environment is filled in from /etc/stockroom.env
+(override with STOCKROOM_ENV_FILE), the same file the systemd units read, so a
+CLI command run by hand on the Pi sees the installed settings.
+
 Environment variables (all optional):
 
+    STOCKROOM_ENV_FILE      where to read the above from  (default /etc/stockroom.env)
     STOCKROOM_DATA_DIR      where stockroom.db lives      (default <repo>/data)
     STOCKROOM_DB            full path to the database     (overrides the above)
     STOCKROOM_PUBLISH_DIR   where the public site is written (default <repo>/publish)
@@ -35,6 +40,55 @@ from pathlib import Path
 
 # <repo root>/src/stockroom/config.py -> <repo root>
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# The installed service gets its settings from /etc/stockroom.env via systemd's
+# EnvironmentFile=. Nothing gave them to a CLI invocation, so
+#
+#     sudo -u stockroom /opt/stockroom/.venv/bin/stockroom user create --admin
+#
+# -- the very command setup-pi.sh tells the operator to run next -- fell back
+# to the defaults below and tried to open <repo root>/data, i.e.
+# /opt/stockroom/data, which is root-owned:
+#
+#     PermissionError: [Errno 13] Permission denied: '/opt/stockroom/data'
+#
+# Worse than the error: had the directory been writable, it would have silently
+# created a SECOND empty database beside the real one in /var/lib/stockroom and
+# put the administrator in it.
+#
+# So read the same file systemd reads, here, once, before any default is
+# computed. The environment always wins, which keeps systemd (and the tests'
+# monkeypatching) authoritative -- this only fills in what nobody set.
+ENV_FILE = Path(os.environ.get("STOCKROOM_ENV_FILE", "/etc/stockroom.env"))
+
+
+def _load_env_file(path: Path) -> None:
+    """Apply `KEY=value` lines from an env file to os.environ.
+
+    Deliberately parsed, never executed: this reads a root-owned file in /etc.
+    The grammar is systemd's, not bash's -- everything after the first `=` is
+    the literal value, minus one optional layer of matching quotes. Keep it in
+    step with load_env_file() in deploy/setup-pi.sh, which has to do the same
+    job in shell; tests/test_deploy.py checks the two agree.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return  # absent (the normal case in development) or unreadable
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ";")) or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key.isidentifier() or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+_load_env_file(ENV_FILE)
 
 
 def _env_path(name: str, default: Path) -> Path:

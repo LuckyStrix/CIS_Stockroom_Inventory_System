@@ -681,6 +681,19 @@ def main(argv: list[str] | None = None) -> int:
     except StockroomError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    except PermissionError as exc:
+        # Almost always the data directory, and almost always because the
+        # command was run as the wrong user or against the wrong settings.
+        # A bare traceback here sends people looking for a bug in the app.
+        print(
+            f"Error: permission denied opening {exc.filename or config.DB_PATH}\n"
+            f"       The database is {config.DB_PATH}\n"
+            f"       (from {config.ENV_FILE} if it exists, else the defaults).\n"
+            f"       On the Pi, run as the service account:\n"
+            f"           sudo -u stockroom /opt/stockroom/.venv/bin/stockroom ...",
+            file=sys.stderr,
+        )
+        return 1
     except KeyboardInterrupt:
         return 130
 
