@@ -88,6 +88,24 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _discard(conn: sqlite3.Connection) -> None:
+    """Forget a connection that can no longer be trusted, and close it.
+
+    Only transaction() calls this, and only when a COMMIT or ROLLBACK failed:
+    at that point the connection may still be inside a transaction, and since
+    connect() caches one per thread forever, every later request on that
+    thread would inherit the problem.
+    """
+    cache: dict[str, sqlite3.Connection] = getattr(_local, "conns", None) or {}
+    for key, cached in list(cache.items()):
+        if cached is conn:
+            del cache[key]
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+
 def close_all() -> None:
     """Close this thread's connections. Used by tests and CLI teardown."""
     for conn in getattr(_local, "conns", {}).values():
@@ -142,12 +160,26 @@ def transaction(conn: sqlite3.Connection | None = None) -> Iterator[sqlite3.Conn
     conn.execute("BEGIN IMMEDIATE")
     _local.depth = 1
     try:
-        yield conn
-    except BaseException:
-        conn.execute("ROLLBACK")
+        try:
+            yield conn
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
+    except sqlite3.Error:
+        # The COMMIT or the ROLLBACK itself failed -- a full SD card is the
+        # realistic way that happens here. The transaction may still be open
+        # on this connection, and connections are cached per thread and never
+        # otherwise discarded, so the next BEGIN IMMEDIATE on this thread
+        # would raise "cannot start a transaction within a transaction" and go
+        # on doing so forever. One disk-full moment would wedge a worker
+        # thread for the life of the process.
+        #
+        # Dropping the connection costs one reconnect and leaves the pool
+        # healthy. The original error still propagates.
+        _discard(conn)
         raise
-    else:
-        conn.execute("COMMIT")
     finally:
         _local.depth = 0
 

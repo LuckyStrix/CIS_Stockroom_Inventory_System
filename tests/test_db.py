@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from stockroom import db, service
+from stockroom import config, db, service
 
 
 def test_init_is_idempotent(temp_env):
@@ -136,3 +136,44 @@ def test_item_status_view_stays_consistent(conn, actor, item, person):
     ).fetchone()
     assert row["out_qty"] == 6
     assert row["available"] == row["quantity"] - row["out_qty"] == 4
+
+
+class _CommitFails(sqlite3.Connection):
+    """A connection whose COMMIT fails, as it would on a full SD card."""
+
+    def execute(self, sql, *args, **kwargs):
+        if sql.strip().upper().startswith("COMMIT"):
+            raise sqlite3.OperationalError("disk I/O error")
+        return super().execute(sql, *args, **kwargs)
+
+
+def test_a_failed_commit_does_not_wedge_the_connection(temp_env):
+    """A full SD card must cost one request, not every later one on the thread.
+
+    transaction() reset its depth counter in a finally block but left the
+    connection in the cache -- and if the COMMIT itself failed the connection
+    could still be inside a transaction, so every subsequent BEGIN IMMEDIATE
+    on that thread raised "cannot start a transaction within a transaction"
+    for the life of the process. Connections are cached per thread and never
+    otherwise discarded, so one disk-full moment wedged a worker for good.
+    """
+    db.init_db()
+    path = str(config.DB_PATH)
+
+    broken = sqlite3.connect(path, factory=_CommitFails)
+    broken.row_factory = sqlite3.Row
+    broken.isolation_level = None
+    # Put it in the cache, which is where a real request would find it.
+    db._local.conns[path] = broken
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        with db.transaction(broken):
+            pass
+
+    # The poisoned connection is gone from the cache, so the next caller gets
+    # a working one instead of inheriting an open transaction forever.
+    assert db._local.conns.get(path) is not broken
+    fresh = db.connect()
+    with db.transaction(fresh):
+        db.set_meta(fresh, "probe", "ok")
+    assert db.get_meta(db.connect(), "probe") == "ok"

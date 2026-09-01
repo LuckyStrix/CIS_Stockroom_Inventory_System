@@ -82,6 +82,17 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def _indexes(conn: sqlite3.Connection) -> dict[str, str]:
+    """Every named index and the SQL that created it."""
+    return {
+        r["name"]: r["sql"]
+        for r in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+            "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'item_fts%'"
+        )
+    }
+
+
 # ---------------------------------------------------------------------------
 # the upgrade itself
 # ---------------------------------------------------------------------------
@@ -138,7 +149,15 @@ def test_a_migrated_database_matches_a_fresh_one(upgraded, tmp_path):
 
     assert _tables(upgraded) == _tables(fresh)
     for table in sorted(_tables(fresh)):
-        assert _columns(upgraded, table) == _columns(fresh, table), (
+        assert _columns(upgraded, table) == _columns(fresh, table)
+
+    # Indexes as well as columns. schema.sql is all CREATE ... IF NOT EXISTS,
+    # so a table that already exists keeps its original definition forever --
+    # which means a UNIQUE or CHECK added to the file reaches a fresh database
+    # and silently misses an upgrading one. Columns are covered by
+    # _ensure_columns; indexes are the other half, and comparing them here is
+    # what would catch a constraint expressed as an index drifting apart.
+    assert _indexes(upgraded) == _indexes(fresh), (
             f"table {table!r} has a different shape after migrating than it "
             "does when created fresh"
         )

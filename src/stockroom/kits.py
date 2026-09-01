@@ -23,10 +23,12 @@ from typing import Any
 
 from . import db
 from .service import (
+    MAX_TEXT,
     Actor,
     ConflictError,
     NotFound,
     ValidationError,
+    _bounded,
     _clean,
     _require,
     get_item,
@@ -170,7 +172,7 @@ def create_kit(
         cur = conn.execute(
             "INSERT INTO kit (name, description, created_at, updated_at) "
             "VALUES (?, ?, ?, ?)",
-            (name, _clean(description), now, now),
+            (name, _bounded(description, "Description", MAX_TEXT), now, now),
         )
         kit_id = int(cur.lastrowid)
         log_event(

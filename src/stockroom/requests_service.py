@@ -36,10 +36,12 @@ from typing import Any
 
 from . import config, db, service
 from .service import (
+    MAX_TEXT,
     Actor,
     ConflictError,
     NotFound,
     ValidationError,
+    _bounded,
     _clean,
     _optional,
     _require,
@@ -365,7 +367,7 @@ def submit_new_item(
             requester_id=requester_id,
             note=note,
             proposed_name=name,
-            proposed_description=_clean(description),
+            proposed_description=_bounded(description, "Description", MAX_TEXT),
             proposed_url=_optional(url),
             proposed_quantity=quantity,
             proposed_vendor=_optional(vendor),
@@ -424,7 +426,8 @@ def _insert(conn: sqlite3.Connection, *, kind: str, requester_id: int,
             note: str, **fields: Any) -> int:
     now = db.utcnow()
     columns = ["kind", "requester_id", "created_at", "updated_at", "requester_note"]
-    values: list[Any] = [kind, requester_id, now, now, _clean(note)]
+    values: list[Any] = [kind, requester_id, now, now,
+                         _bounded(note, "Note", MAX_TEXT)]
     for column, value in fields.items():
         columns.append(column)
         values.append(value)

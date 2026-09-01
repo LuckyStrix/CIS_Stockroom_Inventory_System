@@ -324,8 +324,37 @@ def _clean(value: str | None) -> str:
     return (value or "").strip()
 
 
-def _require(value: str | None, field: str) -> str:
+# Ceilings for free text. Nothing here is a policy about what people may
+# write; they exist because there was no limit anywhere -- not in the schema,
+# which is all TEXT, not in the routes, not in these helpers -- and the one
+# thing this system runs on is an SD card. An approved requester gets twenty
+# submissions an hour and every field accepted whatever fitted in a 9 MB
+# request body; staff-side fields were not even rate limited.
+#
+# Generous enough that nobody writing in good faith will ever see them.
+MAX_NAME = 200
+MAX_LINE = 500        # a location, a serial, an asset tag, a caption
+MAX_TEXT = 4000       # a description, a note, a reason
+
+
+def _bounded(value: str | None, field: str, limit: int) -> str:
+    """Trim and length-check one free-text field.
+
+    Deliberately not folded into _clean(), which is called on values this
+    module generates as well as on ones people type -- a cap belongs where
+    the input arrives, not on every string that passes through.
+    """
     cleaned = _clean(value)
+    if len(cleaned) > limit:
+        raise ValidationError(
+            f"{field} is too long ({len(cleaned)} characters; "
+            f"the limit is {limit})."
+        )
+    return cleaned
+
+
+def _require(value: str | None, field: str, limit: int = MAX_NAME) -> str:
+    cleaned = _bounded(value, field, limit)
     if not cleaned:
         raise ValidationError(f"{field} is required.")
     return cleaned
@@ -444,7 +473,7 @@ def create_person(
         cur = conn.execute(
             """INSERT INTO person (name, email, active, notes, created_at, updated_at)
                VALUES (?, ?, 1, ?, ?, ?)""",
-            (name, email, _clean(notes), now, now),
+            (name, email, _bounded(notes, "Notes", MAX_TEXT), now, now),
         )
         person_id = int(cur.lastrowid)
         log_event(
@@ -502,7 +531,7 @@ def update_person(
                 raise ConflictError(f"{new_email} is already used by {other.name}.")
             changed["email"] = new_email
         if notes is not None:
-            changed["notes"] = _clean(notes)
+            changed["notes"] = _bounded(notes, "Notes", MAX_TEXT)
         if active is not None:
             changed["active"] = int(active)
 
@@ -826,8 +855,12 @@ def create_item(
                               created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (code, name, _clean(description), _clean_url(product_url), quantity,
-             _clean(unit), _clean(shelf), _optional(sub_location), min_quantity,
+            (code, name, _bounded(description, "Description", MAX_TEXT),
+             _clean_url(product_url), quantity,
+             _bounded(unit, "Storage unit", MAX_LINE),
+             _bounded(shelf, "Shelf", MAX_LINE),
+             _optional(_bounded(sub_location, "Sub-location", MAX_LINE)),
+             min_quantity,
              1 if tracked else 0, now, now),
         )
         item_id = int(cur.lastrowid)
@@ -868,15 +901,19 @@ def update_item(
         if "name" in updates:
             changed["name"] = _require(updates["name"], "Name")
         if "description" in updates:
-            changed["description"] = _clean(updates["description"])
+            changed["description"] = _bounded(
+                updates["description"], "Description", MAX_TEXT
+            )
         if "product_url" in updates:
             changed["product_url"] = _clean_url(updates["product_url"])
         if "unit" in updates:
-            changed["unit"] = _clean(updates["unit"])
+            changed["unit"] = _bounded(updates["unit"], "Storage unit", MAX_LINE)
         if "shelf" in updates:
-            changed["shelf"] = _clean(updates["shelf"])
+            changed["shelf"] = _bounded(updates["shelf"], "Shelf", MAX_LINE)
         if "sub_location" in updates:
-            changed["sub_location"] = _optional(updates["sub_location"])
+            changed["sub_location"] = _optional(
+                _bounded(updates["sub_location"], "Sub-location", MAX_LINE)
+            )
         if "min_quantity" in updates:
             raw = updates["min_quantity"]
             changed["min_quantity"] = (
@@ -1120,7 +1157,8 @@ def create_unit(
                               created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (item_id, tag, _optional(serial), _clean(note), now, now),
+            (item_id, tag, _optional(_bounded(serial, "Serial", MAX_LINE)),
+             _bounded(note, "Note", MAX_TEXT), now, now),
         )
         unit_id = int(cur.lastrowid)
         log_event(
@@ -1165,9 +1203,11 @@ def update_unit(
                     )
             changed["asset_tag"] = tag
         if "serial" in updates:
-            changed["serial"] = _optional(updates["serial"])
+            changed["serial"] = _optional(
+                _bounded(updates["serial"], "Serial", MAX_LINE)
+            )
         if "note" in updates:
-            changed["note"] = _clean(updates["note"])
+            changed["note"] = _bounded(updates["note"], "Note", MAX_TEXT)
 
         changes = _diff(current.as_dict(), changed)
         if not changes:
@@ -1322,6 +1362,7 @@ def _open_hold_locked(
     """
     state = _validate_state(state)
     quantity = _as_int(quantity, "Quantity", minimum=1)
+    note = _bounded(note, "Note", MAX_TEXT)
 
     item = get_item(conn, item_id)
 
@@ -1397,6 +1438,7 @@ def change_hold(
     which is the whole reason these are separate states.
     """
     state = _validate_state(state)
+    note = _bounded(note, "Note", MAX_TEXT)
     with db.transaction(conn):
         hold = get_hold(conn, hold_id)
         if not hold.is_open:
@@ -1443,6 +1485,7 @@ def close_hold(
     resolution: str = "",
 ) -> Hold:
     """Put the units back on the shelf. Availability rises again."""
+    resolution = _bounded(resolution, "Resolution", MAX_TEXT)
     with db.transaction(conn):
         hold = get_hold(conn, hold_id)
         if not hold.is_open:
@@ -1533,7 +1576,7 @@ def add_photo(
                                         created_by)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (item_id, stored.filename, _clean(caption),
+                (item_id, stored.filename, _bounded(caption, "Caption", MAX_LINE),
                  0 if existing else 1,      # the first photo leads by default
                  stored.width, stored.height, stored.bytes, now, str(actor)),
             )
@@ -1722,6 +1765,7 @@ def _checkout_locked(
     notification fires once at the end rather than once per line.
     """
     quantity = _as_int(quantity, "Quantity", minimum=1)
+    note = _bounded(note, "Note", MAX_TEXT)
 
     item = get_item(conn, item_id)
     if item.is_archived:
@@ -2032,6 +2076,7 @@ def _return_locked(
     unit_id: int | None = None,
 ) -> Loan:
     """One return, assuming a transaction is already open. See return_loan."""
+    note = _bounded(note, "Note", MAX_TEXT)
     loan = get_loan(conn, loan_id)
     if not loan.is_open:
         raise ConflictError(

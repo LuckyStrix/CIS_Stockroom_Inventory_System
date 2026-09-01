@@ -33,9 +33,11 @@ from typing import Any
 from . import db, search
 from .models import Item
 from .service import (
+    MAX_TEXT,
     Actor,
     ConflictError,
     NotFound,
+    _bounded,
     _clean,
     _optional,
     get_item,
@@ -328,7 +330,8 @@ def start_stocktake(
         cur = conn.execute(
             "INSERT INTO stocktake (started_at, started_by, scope_unit, note) "
             "VALUES (?, ?, ?, ?)",
-            (db.utcnow(), str(actor), _optional(scope_unit), _clean(note)),
+            (db.utcnow(), str(actor), _optional(scope_unit),
+             _bounded(note, "Note", MAX_TEXT)),
         )
         stocktake_id = int(cur.lastrowid)
         session = get_stocktake(conn, stocktake_id)

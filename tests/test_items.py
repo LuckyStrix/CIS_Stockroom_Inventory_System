@@ -139,3 +139,30 @@ def test_a_product_link_must_be_http(conn, actor):
         service.update_item(conn, actor=actor, item_id=ok.id,
                             product_url="javascript:alert(1)")
     assert service.get_item(conn, ok.id).product_url == "https://example.test/thing"
+
+
+def test_free_text_is_bounded(conn, actor, item):
+    """There was no limit on any text field, anywhere.
+
+    Not in the schema, which is all TEXT; not in the routes; not in the
+    validation helpers. An approved requester gets twenty submissions an hour
+    and every field took whatever fitted in a 9 MB body, onto an SD card. The
+    caps are generous enough that nobody writing in good faith meets them.
+    """
+    with pytest.raises(ValidationError, match="too long"):
+        service.create_item(conn, actor=actor, name="x" * (service.MAX_NAME + 1))
+    with pytest.raises(ValidationError, match="too long"):
+        service.create_item(conn, actor=actor, name="Fine",
+                            description="x" * (service.MAX_TEXT + 1))
+    with pytest.raises(ValidationError, match="too long"):
+        service.update_item(conn, actor=actor, item_id=item.id,
+                            description="x" * (service.MAX_TEXT + 1))
+    with pytest.raises(ValidationError, match="too long"):
+        service.create_person(conn, actor=actor, name="Real Person",
+                              email="rp@rit.edu",
+                              notes="x" * (service.MAX_TEXT + 1))
+
+    # And the ordinary case is untouched.
+    ok = service.create_item(conn, actor=actor, name="y" * service.MAX_NAME,
+                             description="z" * service.MAX_TEXT)
+    assert len(ok.name) == service.MAX_NAME

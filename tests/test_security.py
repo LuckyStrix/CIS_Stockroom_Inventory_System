@@ -272,3 +272,54 @@ def test_pruning_removes_only_old_attempts(conn):
     assert removed == 1
     remaining = conn.execute("SELECT email FROM auth_attempt").fetchall()
     assert [r["email"] for r in remaining] == ["a@rit.edu"]
+
+
+def test_a_chunked_body_cannot_dodge_the_size_limit(temp_env, monkeypatch):
+    """The header check has nothing to check when there is no header.
+
+    security_middleware reads the whole body into memory to find the CSRF
+    field, and refused an oversized one by comparing Content-Length. A chunked
+    request carries no Content-Length, so it sailed past and the development
+    server -- which has no nginx in front of it capping bodies at 8m -- was
+    asked to hold whatever arrived.
+    """
+    from fastapi.testclient import TestClient
+
+    from stockroom import config
+    from stockroom.web.app import app
+
+    monkeypatch.setattr(config, "MAX_UPLOAD_BYTES", 4096)
+
+    def chunks():
+        for _ in range(8):
+            yield b"x" * 1024
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/login", content=chunks(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    assert response.status_code == 413
+    assert "larger than" in response.text
+
+
+def test_an_ordinary_body_still_gets_through(temp_env):
+    """The cap must not be so eager that a normal form stops working."""
+    import re
+
+    from fastapi.testclient import TestClient
+
+    from stockroom.web.app import app
+
+    with TestClient(app) as client:
+        token = re.search(
+            r'name="_csrf" value="([^"]+)"', client.get("/login").text
+        ).group(1)
+        response = client.post(
+            "/login",
+            data={"_csrf": token, "email": "nobody@rit.edu", "password": "x" * 20},
+            follow_redirects=False,
+        )
+    # Refused because the account does not exist, not because of the body.
+    assert response.status_code == 303
+    assert "error=" in response.headers["location"]
