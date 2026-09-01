@@ -23,6 +23,7 @@ What this deliberately is *not*: internet-facing. See docs/security.md.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import secrets
 from contextlib import asynccontextmanager
@@ -33,8 +34,9 @@ from fastapi import FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import PlainTextResponse
 
 from .. import __version__, accounts, config, db, service
 from ..publish import worker as publish_worker
@@ -103,9 +105,91 @@ app = FastAPI(
     docs_url="/api/docs",
 )
 
-# Reject requests carrying an unexpected Host header. Without this, a request
-# with a forged Host can poison absolute URLs and password-reset style links.
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.ALLOWED_HOSTS)
+
+# ---------------------------------------------------------------------------
+# the Host check
+# ---------------------------------------------------------------------------
+
+
+def _requested_host(headers: Headers) -> str:
+    """The hostname from the Host header, without the port.
+
+    IPv6 arrives bracketed -- `[fe80::1]:443` -- so splitting on ":" the way
+    the obvious one-liner does turns it into "[fe80", which then matches
+    nothing. Brackets are stripped: the allow list holds bare addresses.
+    """
+    host = headers.get("host", "").strip().lower()
+    if host.startswith("["):
+        host, _, _ = host.partition("]")
+        return host[1:]
+    return host.split(":")[0]
+
+
+def _host_is_allowed(host: str) -> bool:
+    if not host:
+        return False
+    if "*" in config.ALLOWED_HOSTS or host in config.ALLOWED_HOSTS:
+        return True
+    if config.ALLOW_IP_HOSTS:
+        try:
+            ipaddress.ip_address(host)
+            return True
+        except ValueError:
+            pass
+    # `*.example.edu` matches a subdomain, as Starlette's own middleware does.
+    return any(
+        pattern.startswith("*.") and host.endswith(pattern[1:])
+        for pattern in config.ALLOWED_HOSTS
+    )
+
+
+class HostCheckMiddleware:
+    """Reject requests carrying an unexpected Host header.
+
+    This replaces Starlette's TrustedHostMiddleware, which does the same job.
+    It was swapped out for what it says when it refuses: a bare 400 reading
+    "Invalid host header", with no hint as to which header, which hosts are
+    acceptable or where the list is configured. On a stockroom Pi that is a
+    whole afternoon -- the site simply stops working from every device at once,
+    and nothing on the page or in the log says why.
+
+    So: the same check, plus IP addresses (see config.ALLOW_IP_HOSTS), plus an
+    answer that tells whoever is standing there what to do about it.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        host = _requested_host(Headers(scope=scope))
+        if _host_is_allowed(host):
+            await self.app(scope, receive, send)
+            return
+
+        # Never echo a raw header back verbatim: this response is generated
+        # above the middleware that sets X-Content-Type-Options, so a sniffing
+        # browser is the one thing standing between it and rendered markup.
+        shown = "".join(c for c in host if c.isalnum() or c in ".-:")[:60] or "(none)"
+        log.warning("rejected request with Host %r (allowed: %s)",
+                    host, ",".join(config.ALLOWED_HOSTS))
+        body = (
+            f"Invalid host header: {shown}\n\n"
+            f"This server answers to: {', '.join(config.ALLOWED_HOSTS)}"
+            + (" (and any IP address)" if config.ALLOW_IP_HOSTS else "")
+            + "\n\n"
+            "Add the name you used to STOCKROOM_ALLOWED_HOSTS in "
+            "/etc/stockroom.env and restart:\n"
+            "    sudo systemctl restart stockroom\n"
+        )
+        response = PlainTextResponse(body, status_code=400)
+        await response(scope, receive, send)
+
+
+app.add_middleware(HostCheckMiddleware)
 
 
 # ---------------------------------------------------------------------------

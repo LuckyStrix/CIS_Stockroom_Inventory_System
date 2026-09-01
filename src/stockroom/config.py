@@ -22,6 +22,7 @@ Environment variables (all optional):
     STOCKROOM_BARCODE_PREFIX          default "CIS"
     STOCKROOM_PUBLISH_DEBOUNCE        seconds to coalesce republishes (default 2.0)
     STOCKROOM_ALLOWED_HOSTS           comma-separated Host values to accept
+    STOCKROOM_ALLOW_IP_HOSTS          "0" to reject a Host that is a bare IP
     STOCKROOM_SESSION_IDLE_HOURS      idle session timeout (default 8)
     STOCKROOM_SESSION_MAX_DAYS        absolute session cap (default 7)
     STOCKROOM_BACKUP_COPY_DIR         second local copy (a mounted USB stick)
@@ -36,6 +37,7 @@ Environment variables (all optional):
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 
 # <repo root>/src/stockroom/config.py -> <repo root>
@@ -138,18 +140,64 @@ _gh = os.environ.get("STOCKROOM_GITHUB_PAGES_DIR")
 GITHUB_PAGES_DIR: Path | None = Path(_gh).expanduser().resolve() if _gh else None
 GITHUB_PAGES_BRANCH: str = os.environ.get("STOCKROOM_GITHUB_PAGES_BRANCH", "main")
 
-# Host header values this service will answer to. TrustedHostMiddleware
-# rejects anything else, so a forged Host cannot be reflected back into a link.
-# The default covers a Pi named `cis-stockroom` reached by name, by mDNS or
-# over loopback; set the variable for anything else.
-ALLOWED_HOSTS: list[str] = [
-    h.strip()
-    for h in os.environ.get(
-        "STOCKROOM_ALLOWED_HOSTS",
-        "cis-stockroom,cis-stockroom.local,localhost,127.0.0.1,testserver",
-    ).split(",")
-    if h.strip()
-]
+# Host header values this service will answer to. Anything else is rejected,
+# so a forged Host cannot be reflected back into a link.
+#
+# The default used to be the literal string "cis-stockroom,cis-stockroom.local,
+# localhost,127.0.0.1,testserver" -- the hostname docs/raspberry-pi-setup.md
+# tells you to give the Pi. A Pi named anything else served every device on the
+# LAN a bare 400 "Invalid host header", which says nothing about what is wrong
+# or where to fix it.
+#
+# Deriving it from the machine's own hostname means the name that reaches the
+# Pi is the name the Pi accepts, whatever it was called during imaging. That is
+# also where the TLS certificate's SANs come from, so the two agree by
+# construction.
+def _default_allowed_hosts() -> list[str]:
+    host = socket.gethostname().split(".")[0].lower()
+    # `testserver` is what Starlette's TestClient sends; the suite would
+    # otherwise need every request to carry a Host header.
+    return [host, f"{host}.local", "localhost", "127.0.0.1", "::1", "testserver"]
+
+
+_LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "::1"]
+
+
+def _allowed_hosts(configured: str) -> list[str]:
+    """The allow list, from the STOCKROOM_ALLOWED_HOSTS value (may be empty).
+
+    Loopback is always in it, even when an operator sets an explicit list. The
+    service binds 127.0.0.1 and nothing else, so a loopback Host cannot have
+    come from the network -- and it is what the installer's health check,
+    `stockroom doctor` and any curl from an SSH session send. Leaving it out of
+    a custom list would mean the Pi could not answer itself.
+    """
+    named = [h.strip().lower() for h in configured.split(",") if h.strip()]
+    if not named:
+        return _default_allowed_hosts()
+    return list(dict.fromkeys(named + _LOOPBACK_HOSTS))
+
+
+ALLOWED_HOSTS: list[str] = _allowed_hosts(
+    os.environ.get("STOCKROOM_ALLOWED_HOSTS", "")
+)
+
+# Also answer when the Host is a bare IP address, e.g. https://10.14.2.31/.
+#
+# This is not a loosening for its own sake. It is the access route
+# docs/raspberry-pi-setup.md already documents ("if cis-stockroom.local does
+# not resolve, find the Pi's IP on your router"), and on the devices that most
+# need it -- Android phones, Chromebooks, anything without an mDNS resolver --
+# it is the ONLY route. The check above then rejected it, which is a documented
+# instruction that could not work.
+#
+# What the Host check protects is absolute URLs built from the Host header:
+# password-reset links, mails, redirects to a poisoned domain. This application
+# builds none -- every use of `request.url` reads `.path`, `.query` or
+# `.scheme`, never the host -- and it has no email at all, so there is nothing
+# for a forged IP to poison. Names still have to be on the list, and setting
+# this to "0" restores the stricter behaviour.
+ALLOW_IP_HOSTS: bool = _env_bool("STOCKROOM_ALLOW_IP_HOSTS", True)
 
 BARCODE_PREFIX: str = os.environ.get("STOCKROOM_BARCODE_PREFIX", "CIS")
 BARCODE_DIGITS: int = 6  # CIS-000142

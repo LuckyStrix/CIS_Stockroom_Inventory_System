@@ -98,7 +98,13 @@ and requests, and nobody else's.
 - **Headers.** `X-Content-Type-Options`, `X-Frame-Options: DENY`,
   `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`, and
   HSTS when the request actually arrived over TLS.
-- **Host header.** `TrustedHostMiddleware` rejects unexpected `Host` values.
+- **Host header.** `HostCheckMiddleware` rejects unexpected `Host` values
+  (`STOCKROOM_ALLOWED_HOSTS`, defaulting to this machine's own name). Bare IP
+  addresses are accepted: the app never builds an absolute URL from the Host —
+  it reads only the path, query and scheme — and it sends no mail, so there is
+  no link for a forged address to poison, while refusing them broke every
+  device without an mDNS resolver. `STOCKROOM_ALLOW_IP_HOSTS="0"` if a future
+  change introduces such a link.
 - **Redirects.** Every caller-supplied destination — a `next` parameter, a
   `Referer` — is reduced to a local path. Absolute URLs are refused.
 - **The audit log.** Every change is written in the same transaction as the

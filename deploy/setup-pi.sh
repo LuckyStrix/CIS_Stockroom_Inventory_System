@@ -171,8 +171,15 @@ install -m 0644 "$REPO_DIR/deploy/stockroom.service"        /etc/systemd/system/
 install -m 0644 "$REPO_DIR/deploy/stockroom-backup.service" /etc/systemd/system/
 install -m 0644 "$REPO_DIR/deploy/stockroom-backup.timer"   /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now stockroom.service
-systemctl enable --now stockroom-backup.timer
+systemctl enable stockroom.service stockroom-backup.timer
+
+# RESTART, not `enable --now`. On an already-running install `--now` sees an
+# active unit and does nothing, so re-running this script -- which the header
+# above promises "upgrades an existing install in place" -- copied new code to
+# /opt/stockroom and then left the old process serving it. Every fix looked
+# like it had not worked.
+systemctl restart stockroom.service
+systemctl start stockroom-backup.timer
 
 say "Waiting for the service to answer"
 for _ in $(seq 1 20); do
@@ -188,15 +195,23 @@ if ! curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
 fi
 
 HOSTNAME_LOCAL="$(hostname).local"
+# Print the IP as well as the name. `.local` needs an mDNS resolver, which
+# Android and some Chromebooks do not have -- on those the address is the only
+# way in, and someone standing at the counter with a phone should not have to
+# work that out. The app accepts a bare IP as the Host for the same reason.
+LAN_IP="$(hostname -I | awk '{print $1}')"
 ADMIN_EXISTS=$(sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/stockroom" user list --status active 2>/dev/null | grep -c admin || true)
 
 cat <<EOF
 
   Stockroom is running.
 
-    Staff UI     https://${HOSTNAME_LOCAL}/
+    Staff UI     https://${HOSTNAME_LOCAL}/       or  https://${LAN_IP}/
     Public page  https://${HOSTNAME_LOCAL}/public/   (also on http://)
     Health       https://${HOSTNAME_LOCAL}/health
+
+  If a phone cannot open the .local name, use the address. Give the Pi a
+  DHCP reservation on the router so that address does not move.
 
   Your browser will warn about the certificate until you trust it. That is
   expected with a self-signed certificate -- docs/security.md explains how to

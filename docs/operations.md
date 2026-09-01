@@ -134,6 +134,13 @@ STOCKROOM_ORG=Carlson Center for Imaging Science — RIT     # breaks the instal
 
 `sudo systemctl restart stockroom` after editing it.
 
+`STOCKROOM_ALLOWED_HOSTS` is the one worth knowing about before it bites: the
+app refuses a request whose `Host` it does not recognise, which is what an
+`Invalid host header` page means. It defaults to this machine's hostname, that
+name with `.local`, loopback and any bare IP address, so it is normally not
+something you set — a DNS alias or a CNAME is the case that needs it. The
+refusal names the host it turned away and the ones it would accept.
+
 The `stockroom` CLI reads the same file, so a command run by hand uses the same
 database and directories as the service. It has to: nothing hands a `sudo -u
 stockroom stockroom ...` invocation an environment, and before it did, the CLI

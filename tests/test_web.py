@@ -433,3 +433,98 @@ def test_the_return_form_offers_a_condition(client, stocked):
     body = client.get(f"/items/{stocked}").text
     assert 'name="condition"' in body
     assert ">Fine<" in body
+
+
+# ---------------------------------------------------------------------------
+# the Host check
+# ---------------------------------------------------------------------------
+#
+# A real failure: opening the site from a phone on the stockroom LAN returned
+# "Invalid host header" and nothing else. The allow list was the literal string
+# `cis-stockroom,...`, so a Pi imaged under any other name -- or reached at its
+# IP, which is what docs/raspberry-pi-setup.md tells you to do when `.local`
+# does not resolve -- was refused, with no clue as to which header, which hosts
+# were acceptable, or where the list lives.
+
+
+def test_a_request_for_this_machines_hostname_is_accepted(client):
+    """The default list follows the machine, not a name someone hoped for."""
+    import socket
+
+    host = socket.gethostname().split(".")[0]
+    assert client.get("/health", headers={"host": host}).status_code == 200
+    assert client.get("/health", headers={"host": f"{host}.local"}).status_code == 200
+
+
+@pytest.mark.parametrize("host", ["10.14.2.31", "192.168.1.50:443", "[fe80::1]:443"])
+def test_a_bare_ip_address_is_accepted(client, host):
+    """The documented fallback when mDNS does not work, and the only route
+    into the Pi from a device with no `.local` resolver."""
+    assert client.get("/health", headers={"host": host}).status_code == 200
+
+
+def test_an_unknown_host_is_still_rejected(client):
+    """The check is still a check -- this is not `allowed_hosts=["*"]`."""
+    assert client.get("/health", headers={"host": "evil.example"}).status_code == 400
+
+
+def test_the_rejection_says_what_to_do_about_it(client):
+    """The whole reason Starlette's middleware was replaced."""
+    body = client.get("/health", headers={"host": "evil.example"}).text
+    assert "evil.example" in body, "does not say which host was rejected"
+    assert "STOCKROOM_ALLOWED_HOSTS" in body, "does not say where to fix it"
+    assert "systemctl restart stockroom" in body
+
+
+def test_the_rejection_does_not_reflect_markup(client):
+    """It is rendered above the middleware that sets X-Content-Type-Options."""
+    body = client.get(
+        "/health", headers={"host": "<script>alert(1)</script>"}).text
+    assert "<script>" not in body
+
+
+def test_an_empty_host_is_rejected(client):
+    from stockroom.web.app import _host_is_allowed
+
+    assert not _host_is_allowed("")
+
+
+def test_ip_hosts_can_be_switched_off(monkeypatch):
+    from stockroom import config
+    from stockroom.web.app import _host_is_allowed
+
+    assert _host_is_allowed("10.14.2.31")
+    monkeypatch.setattr(config, "ALLOW_IP_HOSTS", False)
+    assert not _host_is_allowed("10.14.2.31")
+
+
+def test_a_configured_wildcard_still_matches_subdomains(monkeypatch):
+    """Starlette's behaviour, kept: an operator's existing value must not
+    quietly change meaning."""
+    from stockroom import config
+    from stockroom.web.app import _host_is_allowed
+
+    monkeypatch.setattr(config, "ALLOWED_HOSTS", ["*.cis.rit.edu"])
+    assert _host_is_allowed("stockroom.cis.rit.edu")
+    assert not _host_is_allowed("cis.rit.edu.evil.example")
+
+
+def test_loopback_survives_an_explicit_allow_list():
+    """The installer's health check and `stockroom doctor` reach the app at
+    127.0.0.1; an operator narrowing the list must not lock the Pi out of
+    itself."""
+    from stockroom.config import _allowed_hosts
+
+    hosts = _allowed_hosts("stockroom.cis.rit.edu, cis-stockroom")
+    assert hosts[:2] == ["stockroom.cis.rit.edu", "cis-stockroom"]
+    assert {"localhost", "127.0.0.1"} <= set(hosts)
+
+
+def test_an_unset_allow_list_follows_the_hostname():
+    import socket
+
+    from stockroom.config import _allowed_hosts
+
+    host = socket.gethostname().split(".")[0].lower()
+    assert _allowed_hosts("") == _allowed_hosts("   ") == [
+        host, f"{host}.local", "localhost", "127.0.0.1", "::1", "testserver"]

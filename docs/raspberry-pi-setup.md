@@ -38,7 +38,8 @@ sudo reboot
 ```
 
 If `cis-stockroom.local` does not resolve, find the Pi's IP on your router and
-use that. mDNS is installed in the next step.
+use that — for SSH now, and for the site later; the app accepts a bare address
+as readily as a name. mDNS is installed in the next step.
 
 ## 3. Give it a fixed address
 
@@ -79,6 +80,16 @@ When it finishes:
 | Staff UI | `https://cis-stockroom.local/` |
 | Public page | `https://cis-stockroom.local/public/` (also plain HTTP) |
 | Health check | `https://cis-stockroom.local/health` |
+
+The installer prints the Pi's IP address alongside these. Both work: the app
+answers to its own hostname, that name with `.local`, and any bare IP address.
+Phones and Chromebooks often cannot resolve `.local` at all, so the address is
+what you give people — which is why step 3 matters.
+
+If a browser gets **`Invalid host header`**, it reached the Pi under a name the
+app does not know (a DNS alias, say). The message names the header it refused
+and the hosts it accepts; add yours to `STOCKROOM_ALLOWED_HOSTS` in
+`/etc/stockroom.env` and `sudo systemctl restart stockroom`.
 
 Your browser will warn about the certificate — it is self-signed. That is
 expected; [security.md](security.md) covers trusting it, and why an

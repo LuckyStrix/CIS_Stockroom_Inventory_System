@@ -429,3 +429,16 @@ def test_the_installer_tells_the_operator_to_run_the_cli_as_the_service_user():
     for line in body.splitlines():
         if "/.venv/bin/stockroom" in line and "sudo" in line:
             assert "sudo -u" in line, f"runs the CLI as root: {line.strip()}"
+
+
+def test_the_installer_restarts_the_service():
+    """`enable --now` does nothing to a unit that is already running, so an
+    in-place upgrade served the old code from the new files."""
+    body = (_DEPLOY / "setup-pi.sh").read_text()
+    assert re.search(r"^systemctl restart stockroom\.service", body, re.M), (
+        "setup-pi.sh never restarts the app; an upgrade would keep running "
+        "the code it replaced"
+    )
+    assert not re.search(r"^systemctl enable --now stockroom\.service", body, re.M), (
+        "`enable --now` is a no-op on a running unit -- use restart"
+    )

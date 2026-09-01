@@ -63,6 +63,12 @@ Other things that are load-bearing:
 - **No inline JavaScript or `style=` attributes**, anywhere. The CSP has no
   `unsafe-inline`, so an inline handler fails silently in the browser. Barcode
   SVGs use `fill=` attributes for the same reason.
+- **The `Host` check derives its allow list from the machine's own hostname**
+  (`config._default_allowed_hosts`) and accepts bare IP addresses. Hardcoding
+  `cis-stockroom` is what made a differently-named Pi answer every device with
+  a bare 400, and refusing IPs broke every phone without an mDNS resolver. The
+  app builds no absolute URL from `Host`, so there is nothing to poison; keep
+  it that way, or set `STOCKROOM_ALLOW_IP_HOSTS="0"`.
 - **`deps.safe_path()` guards every caller-supplied redirect** (`next`,
   `Referer`). Skipping it reintroduces an open redirect.
 - **Do not trust `X-Shib-*` or `X-Remote-User` headers.** That support was
@@ -122,7 +128,7 @@ The phase 2 and phase 3 additions are listed below; the short version is that
 ## Testing
 
 ```bash
-.venv/bin/pytest              # 636 tests, ~4min
+.venv/bin/pytest              # 649 tests, ~4min
 ```
 
 `tests/test_web.py` drives real HTTP requests through the actual routes and
