@@ -538,6 +538,42 @@ def test_the_installer_tells_the_operator_to_run_the_cli_as_the_service_user():
             assert "sudo -u" in line, f"runs the CLI as root: {line.strip()}"
 
 
+def test_the_installer_installs_the_short_command():
+    """README.md and docs/security.md say `stockroom doctor`, not the venv
+    path. That is only true on the Pi because the installer puts a wrapper on
+    the PATH."""
+    body = (_DEPLOY / "setup-pi.sh").read_text()
+    assert re.search(
+        r"install -m 0755 .*stockroom-wrapper\.sh\"? /usr/local/bin/stockroom", body
+    ), "setup-pi.sh no longer installs /usr/local/bin/stockroom"
+
+
+def test_the_wrapper_runs_the_cli_as_the_service_user():
+    """Same reason as the installer check: a root-owned WAL beside the
+    database locks the service out of its own writes."""
+    body = (_DEPLOY / "stockroom-wrapper.sh").read_text()
+    for line in body.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if "/.venv/bin/stockroom" in line and "sudo" in line:
+            assert "-u \"$SERVICE_USER\"" in line or "sudo -u" in line, \
+                f"runs the CLI as the invoking user: {line.strip()}"
+    assert 'exec sudo' in body, "the wrapper stopped dropping privileges"
+    assert 'id -un' in body, (
+        "the wrapper must skip sudo when it is already the service user -- "
+        "a nologin --system account has no password to answer a prompt with"
+    )
+
+
+def test_the_wrapper_carries_the_apps_environment_across_sudo():
+    """`STOCKROOM_ENV_FILE=... stockroom status` is documented in
+    docs/operations.md. Plain sudo resets the environment, which would point
+    that command at the production database without saying so."""
+    body = (_DEPLOY / "stockroom-wrapper.sh").read_text()
+    assert "--preserve-env=" in body, "sudo would drop every STOCKROOM_* override"
+    assert "STOCKROOM_" in body
+
+
 def test_the_installer_restarts_the_service():
     """`enable --now` does nothing to a unit that is already running, so an
     in-place upgrade served the old code from the new files."""

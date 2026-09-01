@@ -69,6 +69,12 @@ python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
 "$APP_DIR/.venv/bin/pip" install --quiet -e "$APP_DIR"
 
+say "Installing the ${SERVICE_USER} command"
+# So that the `stockroom doctor` written in README.md and docs/security.md is
+# a command that exists on this machine, rather than one that needs the venv
+# path and `sudo -u` typed in front of it. The wrapper supplies both.
+install -m 0755 "$REPO_DIR/deploy/stockroom-wrapper.sh" /usr/local/bin/stockroom
+
 say "Preparing ${DATA_DIR}"
 mkdir -p "$DATA_DIR/publish" "$DATA_DIR/backups" "$DATA_DIR/photos"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
@@ -266,7 +272,7 @@ cat <<EOF
   NEXT, AND REQUIRED -- create the first administrator. There is deliberately
   no way to do this over the network:
 
-    sudo -u ${SERVICE_USER} ${APP_DIR}/.venv/bin/stockroom user create \\
+    stockroom user create \\
         --first-name Your --last-name Name --email you@rit.edu --admin
 
 EOF
@@ -275,12 +281,14 @@ fi
 cat <<EOF
   Then
     1. Sign in and import existing stock:
-         sudo -u ${SERVICE_USER} ${APP_DIR}/.venv/bin/stockroom import stock.csv
+         stockroom import stock.csv
          (add --commit once the dry run looks right)
     2. Print barcode labels from  https://${HOSTNAME_LOCAL}/labels
     3. LOCK THE PI DOWN -- this script has not done it:
          sudo ./deploy/harden-pi.sh --subnet <your campus CIDR>
 
+  Commands    stockroom status | doctor | loans --overdue
+              (runs as the ${SERVICE_USER} account; --actor names you in the log)
   Logs        journalctl -u stockroom -f
   Restart     sudo systemctl restart stockroom
   Backups     nightly at 02:30 into ${DATA_DIR}/backups
