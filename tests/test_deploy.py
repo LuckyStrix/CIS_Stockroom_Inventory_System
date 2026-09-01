@@ -103,6 +103,82 @@ def test_the_org_name_survives_both_parsers_intact():
 
 
 # ---------------------------------------------------------------------------
+# the systemd units
+#
+# Nothing checked these at all, and they are the part of the system that runs
+# unattended on a machine nobody watches.
+# ---------------------------------------------------------------------------
+
+
+def _exec_starts(unit: str) -> list[str]:
+    body = (_DEPLOY / unit).read_text()
+    return [
+        line.split("=", 1)[1]
+        for line in body.splitlines()
+        if line.startswith("ExecStart=")
+    ]
+
+
+def test_the_nightly_job_always_reaches_the_health_check():
+    """Type=oneshot stops at the first ExecStart that fails.
+
+    `stockroom backup` exits non-zero when an off-box target fails -- a USB
+    stick nobody plugged back in -- and that used to take `prune` and
+    `doctor` down with it. doctor is the only thing on the Pi that ever looks
+    at the audit chain, the database integrity or the age of the backups, so
+    the one condition most likely to need diagnosing was the one that stopped
+    the diagnosis running.
+    """
+    commands = _exec_starts("stockroom-backup.service")
+    assert len(commands) == 3, "the nightly job's steps changed; re-read this test"
+
+    backup, prune, doctor = commands
+    assert backup.startswith("-"), "a failed backup still aborts the whole unit"
+    assert prune.startswith("-"), "a failed prune still aborts the whole unit"
+    assert doctor.endswith("stockroom doctor"), "doctor must run last"
+    assert not doctor.startswith("-"), (
+        "doctor's exit code is what marks the unit failed; leave it unprefixed"
+    )
+
+
+def test_the_installer_grants_the_backup_job_its_copy_directory():
+    """ProtectSystem=strict makes everything outside ReadWritePaths read-only.
+
+    STOCKROOM_BACKUP_COPY_DIR points outside /var/lib/stockroom by definition
+    -- that is the entire point of it -- so without a drop-in the documented
+    USB backup fails every night with EROFS while working by hand.
+    """
+    unit = (_DEPLOY / "stockroom-backup.service").read_text()
+    assert "ProtectSystem=strict" in unit
+    assert "ReadWritePaths=/var/lib/stockroom" in unit
+
+    body = (_DEPLOY / "setup-pi.sh").read_text()
+    assert "STOCKROOM_BACKUP_COPY_DIR" in body, (
+        "the installer does not grant the configured copy directory; the "
+        "documented off-box backup cannot work under systemd"
+    )
+    assert "stockroom-backup.service.d" in body, "no drop-in is written"
+    assert re.search(r"ReadWritePaths=-\$\{STOCKROOM_BACKUP_COPY_DIR\}", body), (
+        "the drop-in should tolerate the path being absent (the '-' prefix), "
+        "so an unplugged stick is a backup failure and not a unit that will "
+        "not start"
+    )
+
+
+def test_the_service_can_write_everything_it_is_configured_to_write():
+    """Every directory the app writes to must be in ReadWritePaths."""
+    unit = (_DEPLOY / "stockroom.service").read_text()
+    assert "ReadWritePaths=/var/lib/stockroom" in unit
+    example = (_DEPLOY / "stockroom.env.example").read_text()
+    for key in ("STOCKROOM_DATA_DIR", "STOCKROOM_PUBLISH_DIR"):
+        value = re.search(rf'^#?\s*{key}="([^"]*)"', example, re.M)
+        if value and not value.group(1).startswith("/var/lib/stockroom"):
+            raise AssertionError(
+                f"{key} defaults outside ReadWritePaths: {value.group(1)}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # the installer
 # ---------------------------------------------------------------------------
 

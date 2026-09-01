@@ -170,6 +170,33 @@ say "Installing systemd units"
 install -m 0644 "$REPO_DIR/deploy/stockroom.service"        /etc/systemd/system/
 install -m 0644 "$REPO_DIR/deploy/stockroom-backup.service" /etc/systemd/system/
 install -m 0644 "$REPO_DIR/deploy/stockroom-backup.timer"   /etc/systemd/system/
+
+# The backup unit runs under ProtectSystem=strict, which makes everything
+# read-only except the paths it names. STOCKROOM_BACKUP_COPY_DIR points
+# somewhere else by definition -- a USB stick under /mnt, usually -- so
+# without this the documented off-box backup fails every night with a
+# read-only-filesystem error, while the identical command run by hand in an
+# SSH session works perfectly.
+#
+# The "-" prefix on ReadWritePaths means "tolerate this path not existing",
+# so an unplugged stick is a backup failure rather than a unit that refuses
+# to start at all.
+BACKUP_DROPIN=/etc/systemd/system/stockroom-backup.service.d
+( load_env_file "$ENV_FILE"
+  if [[ -n "${STOCKROOM_BACKUP_COPY_DIR:-}" ]]; then
+      say "Granting the backup job write access to ${STOCKROOM_BACKUP_COPY_DIR}"
+      install -d -m 0755 "$BACKUP_DROPIN"
+      cat > "$BACKUP_DROPIN/backup-copy-dir.conf" <<EOF
+# Written by deploy/setup-pi.sh from STOCKROOM_BACKUP_COPY_DIR in
+# ${ENV_FILE}. Change the variable there and re-run the installer rather
+# than editing this file.
+[Service]
+ReadWritePaths=-${STOCKROOM_BACKUP_COPY_DIR}
+EOF
+  else
+      rm -f "$BACKUP_DROPIN/backup-copy-dir.conf"
+  fi )
+
 systemctl daemon-reload
 systemctl enable stockroom.service stockroom-backup.timer
 

@@ -251,6 +251,88 @@ def test_the_public_page_needs_no_session(client, stocked, temp_env):
     assert "Canon EOS R5" in response.text
 
 
+def test_the_app_does_not_override_the_public_pages_own_policy(client, stocked):
+    """The generated page must not be handed the app's nonce CSP as well.
+
+    It is a static file with no nonce -- it carries a <meta> CSP built from
+    hashes of its own inline blocks instead. A browser enforces every policy
+    it receives and takes the intersection, so sending `script-src 'self'
+    'nonce-...'` alongside the hash policy allowed neither the stylesheet nor
+    the script: an unstyled page with an empty table, and nothing in the
+    response to say why.
+    """
+    post(client, "/publish", {}, form_page="/")
+    response = client.get("/public/index.html")
+
+    assert "content-security-policy" not in response.headers, (
+        "the app's nonce policy is being stamped on the generated page, "
+        "which cannot satisfy it"
+    )
+    # The page's own policy is still there, and the rest of the hardening
+    # applies to it exactly as before.
+    assert "Content-Security-Policy" in response.text
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_the_generated_pages_policy_covers_its_own_blocks(temp_env, conn):
+    """Every inline block on the page must be named by the page's own CSP.
+
+    Recomputed here from the served bytes rather than trusted from render.py,
+    because a hash that does not match what actually shipped is a page that
+    silently does nothing.
+    """
+    import base64
+    import hashlib
+    import html as html_module
+
+    from stockroom.publish.render import render_site
+
+    page_html = render_site(conn)["index.html"]
+    policy = html_module.unescape(
+        re.search(
+            r'<meta http-equiv="Content-Security-Policy" content="([^"]*)"',
+            page_html,
+        ).group(1)
+    )
+
+    def digest(block):
+        return "'sha256-" + base64.b64encode(
+            hashlib.sha256(block.encode()).digest()
+        ).decode() + "'"
+
+    styles = re.findall(r"<style[^>]*>(.*?)</style>", page_html, re.S)
+    scripts = [
+        body for attrs, body in re.findall(
+            r"<script([^>]*)>(.*?)</script>", page_html, re.S
+        )
+        if "type=" not in attrs          # the JSON data block is inert
+    ]
+    assert styles and scripts, "the page should have exactly the blocks we hash"
+
+    for block in styles:
+        assert digest(block) in policy, "an inline <style> is not in style-src"
+    for block in scripts:
+        assert digest(block) in policy, "an inline <script> is not in script-src"
+
+
+def test_the_label_sheets_print_button_can_actually_run(client, stocked):
+    """labels.html bypassed page(), so csp_nonce was undefined.
+
+    The page shipped `<script nonce="">` against a header naming a real
+    nonce, so the browser refused the only script on the page -- and the only
+    thing the page is for is pressing Print.
+    """
+    post(client, f"/items/{stocked}/barcode", {}, form_page=f"/items/{stocked}")
+    response = client.get("/labels")
+
+    assert response.status_code == 200
+    nonce = re.search(r'<script nonce="([^"]*)"', response.text).group(1)
+    assert nonce, "the label sheet's script has an empty nonce"
+    assert f"'nonce-{nonce}'" in response.headers["content-security-policy"], \
+        "the nonce in the page does not match the one in the policy"
+
+
 # ---------------------------------------------------------------------------
 # The CSP is only worth having if the templates actually live within it.
 # ---------------------------------------------------------------------------

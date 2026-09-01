@@ -203,10 +203,11 @@ def test_a_report_shows_what_it_found_not_what_is_true_now(conn, actor, shelf,
                                                            person):
     """Reopening an old count must not re-derive against today's shelves.
 
-    It does re-derive -- reconcile is a pure read -- so this pins the
-    behaviour deliberately rather than by accident: what a stocktake means is
-    "these are the scans", and the comparison is always against current
-    expectations. Worth knowing when reading an old report.
+    It used to: `expected` came from item_status at read time, so a count that
+    finished clean in March grew discrepancies in April as things were lent
+    out, and nobody reading the report could tell which numbers were findings
+    and which were just this morning's loans. A finished stocktake is an
+    observation of one day, so it is recorded rather than recomputed.
     """
     session = stocktake.start_stocktake(conn, actor=actor, scope_unit="Unit B")
     scan_all(conn, actor, session,
@@ -216,8 +217,46 @@ def test_a_report_shows_what_it_found_not_what_is_true_now(conn, actor, shelf,
 
     service.checkout(conn, actor=actor, item_id=shelf["cards"].id,
                      person_id=person.id, quantity=3)
+
     later = stocktake.reconcile(conn, session.id)
-    assert not later.is_clean, "the comparison is always against today"
+    assert later.is_clean, "a finished report changed after the shelves moved"
+    assert [(d.item_name, d.expected, d.counted) for d in later.matched] == \
+           [(d.item_name, d.expected, d.counted) for d in result.matched]
+
+
+def test_an_open_count_still_reflects_the_shelves_as_they_are(conn, actor,
+                                                              shelf, person):
+    """The freeze applies to a finished count, not to one in progress.
+
+    While somebody is walking the room the whole value of the progress view is
+    that it is live.
+    """
+    service.checkout(conn, actor=actor, item_id=shelf["cards"].id,
+                     person_id=person.id, quantity=3)
+    session = stocktake.start_stocktake(conn, actor=actor, scope_unit="Unit B")
+    scan_all(conn, actor, session,
+             [(shelf["cards"], 7), (shelf["tripod"], 2), (shelf["reader"], 4)])
+
+    assert stocktake.reconcile(conn, session.id).is_clean, \
+        "an open count must compare against what is on the shelf now"
+
+
+def test_an_abandoned_count_records_no_findings(conn, actor, shelf):
+    """A half-count is not an observation -- there is nothing to freeze.
+
+    Its scans are kept, so reconcile falls back to computing, which is the
+    most honest thing available for a count nobody finished.
+    """
+    session = stocktake.start_stocktake(conn, actor=actor, scope_unit="Unit B")
+    scan_all(conn, actor, session, [(shelf["cards"], 10)])
+    stocktake.abandon_stocktake(conn, actor=actor, stocktake_id=session.id,
+                                reason="fire alarm")
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM stocktake_result WHERE stocktake_id = ?",
+        (session.id,),
+    ).fetchone()[0] == 0
+    assert stocktake.reconcile(conn, session.id) is not None
 
 
 def test_the_stocktake_is_audited_at_both_ends(conn, actor, shelf):

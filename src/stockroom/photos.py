@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import io
 import secrets
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,18 +77,40 @@ def store(data: bytes, *, max_pixels: int | None = None) -> StoredPhoto:
 
     limit = max_pixels or config.PHOTO_MAX_PIXELS
     try:
-        with Image.open(io.BytesIO(data)) as image:
-            # Apply EXIF orientation while the tag is still there, then drop
-            # every tag by copying the pixels into a new image below.
-            image = ImageOps.exif_transpose(image)
-            image = image.convert("RGB")
-            image.thumbnail((limit, limit), Image.LANCZOS)
+        # A decompression bomb is a small file that declares an enormous
+        # canvas: 388 KB of PNG can claim 20000x20000, which is 400 megapixels
+        # and well over a gigabyte once decoded. Pillow raises
+        # DecompressionBombError above 2x MAX_IMAGE_PIXELS -- and that
+        # subclasses Exception, not OSError, so it sailed past the handlers
+        # below and out of the route as a 500. Between 1x and 2x it only warns
+        # and decodes anyway, which on a Pi is the more dangerous half.
+        #
+        # Promoting the warning makes both bands raise, and both are caught
+        # here as an ordinary bad upload.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                # Ask the decoder for something near the size we actually want.
+                # JPEG can decode at 1/2, 1/4 or 1/8 scale, so a phone photo
+                # never has to exist at full resolution to be shrunk. A no-op
+                # for formats that cannot do it.
+                image.draft("RGB", (limit, limit))
+                # Apply EXIF orientation while the tag is still there, then
+                # drop every tag by copying the pixels into a new image below.
+                image = ImageOps.exif_transpose(image)
+                image = image.convert("RGB")
+                image.thumbnail((limit, limit), Image.LANCZOS)
 
-            buffer = io.BytesIO()
-            # No exif= argument: a fresh JPEG carries no metadata at all.
-            image.save(buffer, format="JPEG", quality=config.PHOTO_QUALITY,
-                       optimize=True)
-            width, height = image.size
+                buffer = io.BytesIO()
+                # No exif= argument: a fresh JPEG carries no metadata at all.
+                image.save(buffer, format="JPEG", quality=config.PHOTO_QUALITY,
+                           optimize=True)
+                width, height = image.size
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise PhotoError(
+            "That image claims to be far too large to process. If it is a "
+            "real photo, open it and save a smaller copy."
+        ) from exc
     except UnidentifiedImageError as exc:
         raise PhotoError(
             "That file is not an image the system can read. JPEG, PNG, HEIC "

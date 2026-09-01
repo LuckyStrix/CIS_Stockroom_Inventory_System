@@ -327,6 +327,29 @@ def test_a_forged_session_cookie_is_rejected(app, admin):
         assert client.get("/", follow_redirects=False).status_code == 303
 
 
+def test_a_return_cannot_redirect_off_site(staff_client, conn):
+    """The `next` field on a return form is attacker-controlled.
+
+    Handed to redirect() unwrapped it turned this route into a launch pad for
+    a phishing link: a POST with next=https://evil.example/ answered 303 to
+    that host, carrying the site's own flash message with it.
+    """
+    item = service.create_item(conn, actor=SETUP, name="Tripod", quantity=2)
+    person = service.create_person(conn, actor=SETUP, name="Al", email="al@rit.edu")
+    loan = service.checkout(conn, actor=SETUP, item_id=item.id, person_id=person.id)
+
+    response = staff_client.post(
+        f"/loans/{loan.id}/return",
+        data={"_csrf": csrf(staff_client, "/loans"),
+              "next": "https://evil.example/phish"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert not response.headers["location"].startswith("http"), \
+        f"redirected off-site to {response.headers['location']}"
+    assert response.headers["location"].startswith("/loans")
+
+
 # ---------------------------------------------------------------------------
 # headers
 # ---------------------------------------------------------------------------
@@ -339,6 +362,54 @@ def test_security_headers_are_present(staff_client):
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["referrer-policy"] == "same-origin"
+
+
+@pytest.mark.parametrize(
+    "make_request",
+    [
+        pytest.param(
+            lambda c: c.get("/items", follow_redirects=False),
+            id="anonymous-redirect-to-login",
+        ),
+        pytest.param(
+            lambda c: c.post("/items/new", data={"name": "x"},
+                             follow_redirects=False),
+            id="refused-post",
+        ),
+    ],
+)
+def test_a_refusal_is_hardened_like_any_other_response(app, admin, make_request):
+    """The pages a hostile request actually reaches must carry the headers too.
+
+    require_authentication used to sit OUTSIDE the middleware that adds them,
+    so its 401 page and its /login redirect went out bare; and the CSRF and
+    oversize refusals returned early from inside that middleware, skipping the
+    same step. Between them that was every refusal the application makes.
+    """
+    with TestClient(app) as anonymous:
+        response = make_request(anonymous)
+
+    assert response.status_code in (303, 401, 403)
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    if response.headers.get("content-type", "").startswith("text/html"):
+        assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+
+def test_the_host_check_runs_before_anything_else(app, admin):
+    """A forged Host must be refused on a protected path too.
+
+    The Host check was the innermost of the three middlewares, so an anonymous
+    request to a protected path was redirected to /login and never reached it.
+    Both existing Host tests use /health, which is public, so neither noticed.
+    """
+    with TestClient(app) as anonymous:
+        response = anonymous.get(
+            "/items", headers={"host": "evil.example"}, follow_redirects=False
+        )
+    assert response.status_code == 400, \
+        "the Host check is being reached after the authentication gate"
+    assert "STOCKROOM_ALLOWED_HOSTS" in response.text
 
 
 def test_the_nonce_changes_every_request(staff_client):

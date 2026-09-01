@@ -179,6 +179,37 @@ def test_a_correct_password_is_refused_while_locked_out(conn, active):
         accounts.login(conn, email="an1234@rit.edu", password=OTHER, ip="10.0.0.1")
 
 
+def test_a_blocked_attempt_does_not_extend_the_lockout(conn, active):
+    """Otherwise anyone can lock any staff account out for good.
+
+    A rejected-while-locked attempt never reaches the password check, so there
+    is nothing to count. Counting it anyway fed the sliding window that caused
+    the lockout, which made it self-sustaining: five guesses every fifteen
+    minutes and the real owner never gets back in.
+    """
+    for _ in range(security.MAX_FAILURES_PER_EMAIL):
+        with pytest.raises(accounts.AuthError):
+            accounts.login(conn, email="an1234@rit.edu", password="nope nope nope",
+                           ip="10.0.0.1")
+
+    def failures():
+        return conn.execute(
+            "SELECT COUNT(*) FROM auth_attempt WHERE email = ? AND success = 0",
+            ("an1234@rit.edu",),
+        ).fetchone()[0]
+
+    recorded = failures()
+    for _ in range(10):
+        with pytest.raises(accounts.AuthError, match="Too many"):
+            accounts.login(conn, email="an1234@rit.edu", password="nope nope nope",
+                           ip="10.0.0.1")
+
+    assert failures() == recorded, \
+        "attempts refused by the lockout must not feed the lockout window"
+    assert "auth.lockout" in [e.action for e in service.list_events(conn)], \
+        "the blocked attempt must still be audited"
+
+
 def test_login_upgrades_a_weakly_hashed_password(conn, admin):
     """The rehash path: the only moment the plaintext is available."""
     weak = security.hash_password(STRONG, n=2**14, r=8, p=1)
@@ -219,6 +250,50 @@ def test_the_absolute_cap_is_never_extended(conn, active):
     for _ in range(3):
         accounts.resolve_session(conn, result.token)
     assert conn.execute("SELECT absolute_expires_at FROM session").fetchone()[0] == original
+
+
+def test_the_idle_expiry_slides_forward_on_use(conn, active, monkeypatch):
+    """Nothing asserted this at all, so nothing would have noticed it stop.
+
+    The existing cap test passes with the UPDATE deleted outright.
+    """
+    monkeypatch.setattr(accounts, "HEARTBEAT_SECONDS", 0)
+    result = accounts.login(conn, email="an1234@rit.edu", password=OTHER)
+
+    # An idle expiry far enough out to still be live, a stale heartbeat, and
+    # an absolute cap beyond both so it is not what limits the slide.
+    with db.transaction(conn):
+        conn.execute(
+            "UPDATE session SET expires_at = ?, last_seen_at = ?, "
+            "absolute_expires_at = ?",
+            ("2030-01-01T00:00:00Z", "2000-01-01T00:00:00Z", "2099-01-01T00:00:00Z"),
+        )
+
+    accounts.resolve_session(conn, result.token)
+    row = conn.execute("SELECT expires_at, last_seen_at FROM session").fetchone()
+    assert row["expires_at"] != "2030-01-01T00:00:00Z", "the idle expiry did not move"
+    assert row["last_seen_at"] != "2000-01-01T00:00:00Z"
+
+
+def test_the_heartbeat_does_not_write_on_every_request(conn, active):
+    """resolve_session took the write lock on every authenticated request.
+
+    db.transaction() is BEGIN IMMEDIATE, so viewing any page could block a
+    checkout at the counter, and every navigation wrote to the SD card. The
+    window being maintained is eight hours long; a minute of lag is free.
+    """
+    result = accounts.login(conn, email="an1234@rit.edu", password=OTHER)
+    before = conn.execute(
+        "SELECT last_seen_at, expires_at FROM session"
+    ).fetchone()
+
+    for _ in range(20):
+        assert accounts.resolve_session(conn, result.token) is not None
+
+    after = conn.execute("SELECT last_seen_at, expires_at FROM session").fetchone()
+    assert (after["last_seen_at"], after["expires_at"]) == \
+           (before["last_seen_at"], before["expires_at"]), \
+        "the heartbeat is still writing once per request"
 
 
 def test_a_session_past_its_absolute_cap_is_dead(conn, active):

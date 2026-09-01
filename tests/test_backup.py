@@ -108,6 +108,70 @@ def test_an_unmounted_drive_says_so(snapshot, tmp_path):
         target.store(snapshot)
 
 
+def test_an_off_box_copy_that_does_not_verify_is_refused(snapshot, tmp_path,
+                                                         monkeypatch):
+    """Same rule the local snapshot already follows.
+
+    db.backup() deletes a snapshot that fails verification, on the grounds
+    that a file which looks like a backup and is not is worse than no file.
+    The copy on the stick was then made with a bare copy2 -- unchecked and not
+    atomic -- so a drive pulled mid-write left a truncated file that passes
+    every existence-and-age check doctor makes.
+    """
+    usb = tmp_path / "usb"
+    usb.mkdir()
+    monkeypatch.setattr(db, "verify_file", lambda path: "disk image is malformed")
+
+    with pytest.raises(RuntimeError, match="did not verify"):
+        LocalDirTarget(usb).store(snapshot)
+
+    assert list(usb.iterdir()) == [], \
+        "a copy that failed to verify was left behind wearing a backup's name"
+
+
+def test_a_partial_copy_never_wears_a_backups_name(snapshot, tmp_path, monkeypatch):
+    """The rename is what makes it atomic: readers see all of it or none."""
+    usb = tmp_path / "usb"
+    usb.mkdir()
+    seen = []
+    real_copy = backup_targets.shutil.copy2
+
+    def watching_copy(src, dst):
+        seen.append(Path(dst).name)
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(backup_targets.shutil, "copy2", watching_copy)
+    LocalDirTarget(usb).store(snapshot)
+
+    assert seen == [snapshot.name + ".part"], \
+        "the copy was written straight to its final name"
+    assert (usb / snapshot.name).read_bytes() == snapshot.read_bytes()
+    assert not list(usb.glob("*.part"))
+
+
+def test_a_copy_directory_the_job_cannot_write_to_is_named(temp_env, monkeypatch,
+                                                           tmp_path):
+    """The nightly unit runs under ProtectSystem=strict.
+
+    A copy directory outside /var/lib/stockroom is read-only to it, while the
+    same command by hand works -- so "empty" was the only clue, and it points
+    at the wrong problem entirely.
+    """
+    usb = tmp_path / "usb"
+    usb.mkdir()
+    monkeypatch.setattr(config, "BACKUP_COPY_DIR", usb)
+    usb.chmod(0o555)
+    try:
+        check = diagnostics.check_offsite_backups(skip_remote=True)
+    finally:
+        usb.chmod(0o755)
+
+    assert not check.ok
+    assert "not writable" in check.detail
+    assert "ReadWritePaths" in check.detail, \
+        "the fix is a systemd sandbox setting; say so"
+
+
 # ---------------------------------------------------------------------------
 # rclone
 #

@@ -95,6 +95,24 @@ and requests, and nobody else's.
   No inline event handlers and no inline `style` attributes anywhere — which is
   why the templates use utility classes, and why barcode SVGs use `fill=`
   attributes rather than `style="fill:…"`.
+
+  The **generated public page is the one exception**, and it is stricter
+  rather than looser. It is a static file that has to work from a USB stick
+  and from GitHub Pages, where no server exists to mint a nonce, so
+  `publish/render._csp_hashes` builds it a `<meta>` policy naming the SHA-256
+  hashes of its own inline `<style>` and `<script>` — `default-src 'none'`,
+  no `'self'`, no `unsafe-inline`. The app deliberately does not add its own
+  header to `/public` responses: a browser enforces every policy it receives
+  and takes the intersection, so the nonce policy and the hash policy together
+  allowed nothing at all, and the page rendered unstyled with an empty table
+  wherever it was served by the application rather than by nginx.
+
+- **Middleware order.** `HostCheck` outermost, then CSRF and the security
+  headers, then the authentication gate. It is registered in one explicit
+  block in `web/app.py` because `add_middleware` reverses declaration order,
+  and getting it wrong is invisible: with the auth gate outermost, every
+  refusal it produced — the 401 page and the redirect to `/login` — went to
+  the browser with none of the headers below.
 - **Headers.** `X-Content-Type-Options`, `X-Frame-Options: DENY`,
   `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`, and
   HSTS when the request actually arrived over TLS.

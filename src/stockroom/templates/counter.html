@@ -26,7 +26,7 @@
   <div class="card">
     <div class="scan">
       <input id="scan" name="code" type="search" autocomplete="off" autofocus
-             placeholder="Scan a barcode, or type a name…"
+             placeholder="Scan a barcode or asset tag, or type a name…"
              aria-label="Scan an item into the basket">
       <button class="btn">Add</button>
     </div>
@@ -52,16 +52,28 @@
       <tr>
         <td>
           <a href="/items/{{ line.item.id }}">{{ line.item.name }}</a>
+          {% if line.unit %}<div class="mono small">{{ line.unit.label }}</div>{% endif %}
           {% if line.item.barcode %}<div class="mono muted small">{{ line.item.barcode }}</div>{% endif %}
           <input type="hidden" name="item_id" value="{{ line.item.id }}">
+          {# Always emitted, empty for a countable line, so the three hidden
+             columns stay the same length and a line never loses its unit. #}
+          <input type="hidden" name="unit_id" value="{{ line.unit_id if line.unit_id else '' }}">
         </td>
         <td class="nowrap muted">{{ line.item.location }}</td>
         <td class="num">
-          <input name="quantity" type="number" value="{{ line.quantity }}" min="1"
-                 class="qty" aria-label="Quantity of {{ line.item.name }}">
+          {% if line.unit %}
+            {# One object is one of something; there is nothing to choose. #}
+            <input type="hidden" name="quantity" value="1">
+            1
+          {% else %}
+            <input name="quantity" type="number" value="{{ line.quantity }}" min="1"
+                   class="qty" aria-label="Quantity of {{ line.item.name }}">
+          {% endif %}
         </td>
         <td class="nowrap">
-          {% if line.short %}
+          {% if line.unit and line.unit.is_on_loan %}
+            <span class="pill out">already out{% if line.unit.borrower_name %} with {{ line.unit.borrower_name }}{% endif %}</span>
+          {% elif line.short %}
             <span class="pill out">only {{ line.item.available }} available</span>
           {% else %}
             <span class="muted">{{ line.item.available }} available</span>
@@ -69,7 +81,7 @@
         </td>
         <td class="nowrap">
           <button class="btn small secondary" formaction="/counter/remove"
-                  name="drop" value="{{ line.item.id }}">Remove</button>
+                  name="drop" value="{{ line.key }}">Remove</button>
         </td>
       </tr>
       {% endfor %}

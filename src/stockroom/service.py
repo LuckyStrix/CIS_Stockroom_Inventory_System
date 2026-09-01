@@ -1031,8 +1031,11 @@ def get_unit_by_asset_tag(conn: sqlite3.Connection, asset_tag: str) -> Unit | No
     tag = _clean(asset_tag)
     if not tag:
         return None
+    # COLLATE NOCASE to match get_item_by_barcode. A scanner is exact, but
+    # people type these too, and an asset tag that resolves only in the case
+    # it was entered in is a confusing thing to hand somebody at a counter.
     row = conn.execute(
-        "SELECT * FROM unit_status WHERE asset_tag = ?", (tag,)
+        "SELECT * FROM unit_status WHERE asset_tag = ? COLLATE NOCASE", (tag,)
     ).fetchone()
     return Unit.from_row(row) if row else None
 
@@ -1647,6 +1650,7 @@ def checkout(
     quantity: int = 1,
     due_at: str | None = None,
     note: str = "",
+    unit_id: int | None = None,
 ) -> Loan:
     """Lend ``quantity`` units of an item to a person.
 
@@ -1654,14 +1658,22 @@ def checkout(
     ``person_name``/``person_email`` -- the latter creates the person if they
     are new, which is what the checkout form does.
 
+    ``unit_id`` names the individual object going out, for an item whose units
+    are tracked. It is optional everywhere: most of the stockroom is countable
+    and has no unit rows at all. When given, the quantity is one by
+    definition, and the unit must belong to this item, be sound, not retired,
+    and not already be in somebody else's bag.
+
     The availability check and the INSERT happen inside one IMMEDIATE
     transaction, so two people racing for the last unit cannot both succeed.
+    A race for the same *unit* is caught by idx_loan_one_open_per_unit as
+    well, so it cannot happen even if this check is ever loosened.
     """
     with db.transaction(conn):
         loan = _checkout_locked(
             conn, actor=actor, item_id=item_id, person_id=person_id,
             person_name=person_name, person_email=person_email,
-            quantity=quantity, due_at=due_at, note=note,
+            quantity=quantity, due_at=due_at, note=note, unit_id=unit_id,
         )
     _notify_change()
     return loan
@@ -1678,6 +1690,7 @@ def _checkout_locked(
     quantity: int = 1,
     due_at: str | None = None,
     note: str = "",
+    unit_id: int | None = None,
 ) -> Loan:
     """One checkout, assuming a transaction is already open.
 
@@ -1690,6 +1703,32 @@ def _checkout_locked(
     item = get_item(conn, item_id)
     if item.is_archived:
         raise ConflictError(f"{item.name} is archived and cannot be checked out.")
+
+    unit = None
+    if unit_id is not None:
+        # The same checks _open_hold_locked makes, for the same reasons, plus
+        # one it does not need: a unit can only be in one person's hands.
+        unit = get_unit(conn, unit_id)
+        if unit.item_id != item_id:
+            raise ValidationError(
+                f"{unit.label} does not belong to {item.name}."
+            )
+        if unit.is_retired:
+            raise ConflictError(f"{unit.label} has been retired.")
+        if unit.state != "ok":
+            raise ConflictError(
+                f"{unit.label} is recorded as {unit.state_label.lower()} "
+                "and cannot go out."
+            )
+        if unit.is_on_loan:
+            raise ConflictError(
+                f"{unit.label} is already checked out"
+                + (f" to {unit.borrower_name}." if unit.borrower_name else ".")
+            )
+        # One physical object is one of something. Enforced here rather than
+        # as a table CHECK because ALTER TABLE cannot add one -- see the note
+        # on the loan table in schema.sql.
+        quantity = 1
 
     if person_id is not None:
         person = get_person(conn, person_id)
@@ -1711,14 +1750,25 @@ def _checkout_locked(
 
     cur = conn.execute(
         """
-        INSERT INTO loan (item_id, person_id, quantity, checked_out_at,
-                          due_at, checkout_note, checked_out_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO loan (item_id, person_id, unit_id, quantity,
+                          checked_out_at, due_at, checkout_note,
+                          checked_out_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (item_id, person.id, quantity, db.utcnow(),
+        (item_id, person.id, unit_id, quantity, db.utcnow(),
          _optional(due_at), _clean(note), str(actor)),
     )
     loan_id = int(cur.lastrowid)
+    what = f"{quantity} x {item.name}" if unit is None else f"{item.name} {unit.label}"
+    changes: dict[str, dict[str, Any]] = {
+        "quantity": {"from": None, "to": quantity},
+        "due_at": {"from": None, "to": _optional(due_at)},
+    }
+    if unit is not None:
+        # Which one went out belongs in the log, not only in the loan row.
+        # "Who had the body that came back bent" is answered from here.
+        changes["unit"] = {"from": None, "to": unit.label}
+        changes["unit_id"] = {"from": None, "to": unit.id}
     log_event(
         conn,
         actor=actor,
@@ -1728,23 +1778,26 @@ def _checkout_locked(
         item_id=item_id,
         person_id=person.id,
         summary=(
-            f"{person.name} checked out {quantity} x {item.name} "
+            f"{person.name} checked out {what} "
             f"({item.available - quantity} of {item.quantity} left)"
         ),
-        changes={
-            "quantity": {"from": None, "to": quantity},
-            "due_at": {"from": None, "to": _optional(due_at)},
-        },
+        changes=changes,
     )
     return get_loan(conn, loan_id)
 
 
 @dataclass(frozen=True, slots=True)
 class BasketLine:
-    """One line of a counter basket: how many of which item."""
+    """One line of a counter basket: how many of which item.
+
+    ``unit_id`` names an individual object when the line came from scanning an
+    asset tag rather than an item barcode. Defaulted, so the plain
+    ``(item_id, quantity)`` tuple form callers already use still works.
+    """
 
     item_id: int
     quantity: int = 1
+    unit_id: int | None = None
 
 
 def checkout_many(
@@ -1771,7 +1824,10 @@ def checkout_many(
     unrelated events a second apart.
     """
     basket = [
-        line if isinstance(line, BasketLine) else BasketLine(line[0], line[1])
+        # Accepts BasketLine, (item_id, quantity) or
+        # (item_id, quantity, unit_id) -- the tuple forms are what the counter
+        # and the tests pass, and the two-element one predates units.
+        line if isinstance(line, BasketLine) else BasketLine(*line)
         for line in lines
     ]
     if not basket:
@@ -1796,6 +1852,7 @@ def checkout_many(
             _checkout_locked(
                 conn, actor=actor, item_id=line.item_id, person_id=person_id,
                 quantity=line.quantity, due_at=due_at, note=note,
+                unit_id=line.unit_id,
             )
             for line in basket
         ]
@@ -1811,7 +1868,7 @@ def checkout_many(
             summary=(
                 f"{person.name} checked out {total} unit(s) across "
                 f"{len(loans)} item(s): "
-                + ", ".join(f"{l.quantity} x {l.item_name}" for l in loans)
+                + ", ".join(l.what for l in loans)
             ),
             changes={"loan_ids": {"from": None, "to": [l.id for l in loans]}},
         )
@@ -1826,14 +1883,31 @@ def return_many(
     loan_ids: list[int],
     note: str = "",
 ) -> list[Loan]:
-    """Close a set of loans in one transaction. The mirror of checkout_many."""
+    """Close a set of loans in one transaction. The mirror of checkout_many.
+
+    Every loan must belong to the same person. The batch event names one
+    borrower, so a mixed batch would write a sentence into the audit log that
+    is not true -- "Alice returned 2 items" when Bob returned one of them.
+    The per-loan events stay correct either way, but the log is the point of
+    this system and a summary that lies is worse than no summary.
+    """
     if not loan_ids:
         raise ValidationError("There is nothing to return.")
 
     with db.transaction(conn):
+        # Resolve before closing anything, so the refusal below costs nothing
+        # and the error names the problem rather than a rolled-back attempt.
+        loans = [get_loan(conn, loan_id) for loan_id in loan_ids]
+        owners = {loan.person_id for loan in loans}
+        if len(owners) > 1:
+            raise ValidationError(
+                "Those loans are not all held by the same person. "
+                "Return one person's items at a time."
+            )
+
         closed = [
-            _return_locked(conn, actor=actor, loan_id=loan_id, note=note)
-            for loan_id in loan_ids
+            _return_locked(conn, actor=actor, loan_id=loan.id, note=note)
+            for loan in loans
         ]
         person_id = closed[0].person_id
         log_event(
@@ -1845,7 +1919,7 @@ def return_many(
             person_id=person_id,
             summary=(
                 f"{closed[0].person_name} returned {len(closed)} item(s): "
-                + ", ".join(f"{l.quantity} x {l.item_name}" for l in closed)
+                + ", ".join(l.what for l in closed)
             ),
             changes={"loan_ids": {"from": [l.id for l in closed], "to": None}},
         )
@@ -1868,6 +1942,20 @@ def open_loans_for_item_and_person(
         (item_id, person_id),
     )
     return [Loan.from_row(r) for r in rows]
+
+
+def open_loan_for_unit(conn: sqlite3.Connection, unit_id: int) -> Loan | None:
+    """The open loan holding this unit, if any.
+
+    Unambiguous by construction: idx_loan_one_open_per_unit permits only one.
+    This is what makes scanning an asset tag at the return desk exact, where
+    scanning an item barcode can only guess at the oldest matching loan.
+    """
+    row = conn.execute(
+        "SELECT * FROM loan_detail WHERE unit_id = ? AND returned_at IS NULL",
+        (unit_id,),
+    ).fetchone()
+    return Loan.from_row(row) if row else None
 
 
 def return_loan(
@@ -1946,6 +2034,15 @@ def _return_locked(
     remaining = loan.quantity - returning
     residual_id: int | None = None
     if remaining > 0:
+        # Unreachable for a unit loan, whose quantity is always 1 -- half a
+        # camera body cannot come back. Stated rather than assumed, because
+        # the residual row below would otherwise have to decide whether to
+        # carry the unit forward, and there is no right answer to that.
+        if loan.names_a_unit:
+            raise ConflictError(
+                f"{loan.item_name} {loan.asset_tag or ''} is one object; "
+                "it comes back or it does not.".replace("  ", " ")
+            )
         cur = conn.execute(
             """
             INSERT INTO loan (item_id, person_id, quantity, checked_out_at,
@@ -2004,7 +2101,12 @@ def _return_locked(
             item_id=loan.item_id,
             state=condition,
             quantity=damaged,
-            unit_id=unit_id,
+            # A loan that named a unit already answers "which one", so the
+            # hold does too, without the caller having to say it again. This
+            # is what routes_loans never passed: marking a tracked item broken
+            # at the counter used to open a *countable* hold, losing the one
+            # fact the unit table exists to record.
+            unit_id=unit_id if unit_id is not None else loan.unit_id,
             note=_clean(note),
             loan_id=loan_id,
         )

@@ -39,6 +39,16 @@ def build_v2_database(path: Path, *, events: int = 5) -> Path:
         " updated_at) VALUES ('CIS-000007', 'Canon EOS R5', 3, 'Unit A',"
         " 'Shelf 1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
     )
+    # A loan from before loans could name a unit -- v4 adds loan.unit_id, and
+    # a row that predates it is the case that matters on a real Pi. Closed, so
+    # it does not change what the item has available and disturb the
+    # assertions above.
+    conn.execute(
+        "INSERT INTO loan (item_id, person_id, quantity, checked_out_at,"
+        " returned_at, checked_out_by, returned_by)"
+        " VALUES (1, 1, 1, '2026-01-02T00:00:00Z', '2026-01-09T00:00:00Z',"
+        " 'cli:setup', 'cli:setup')"
+    )
     for n in range(events):
         conn.execute(
             "INSERT INTO event (at, actor, action, entity_type, entity_id,"
@@ -85,6 +95,36 @@ def test_the_columns_added_since_version_2_are_present(upgraded):
     assert "tracked" in _columns(upgraded, "item")
     assert "merged_into_id" in _columns(upgraded, "person")
     assert {"prev_hash", "hash"} <= set(_columns(upgraded, "event"))
+    assert "unit_id" in _columns(upgraded, "loan")
+
+
+def test_the_unit_column_survives_referencing_a_table_that_did_not_exist_yet(
+        upgraded):
+    """loan.unit_id references `unit`, which v2 does not have.
+
+    _ensure_columns runs its ALTER TABLE before schema.sql creates that table,
+    so this is a forward reference at DDL time. SQLite resolves foreign keys
+    when a row is written rather than when the column is declared, so it is
+    legal -- but it is exactly the sort of thing that works until it does not,
+    and the failure would only appear on a real Pi upgrading in place.
+    """
+    assert "unit" in _tables(upgraded)
+    row = upgraded.execute(
+        "SELECT COUNT(*) AS n FROM pragma_foreign_key_list('loan') "
+        "WHERE \"table\" = 'unit'"
+    ).fetchone()
+    assert row["n"] == 1, "the foreign key did not survive the ALTER"
+    assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_loans_from_before_the_upgrade_name_no_unit(upgraded):
+    """Which body went out on a loan closed last year is not recoverable.
+
+    NULL is the honest answer; inventing one would be worse than admitting it.
+    """
+    rows = upgraded.execute("SELECT unit_id FROM loan").fetchall()
+    assert rows, "the fixture should have loans to check"
+    assert all(r["unit_id"] is None for r in rows)
 
 
 def test_a_migrated_database_matches_a_fresh_one(upgraded, tmp_path):

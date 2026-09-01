@@ -137,6 +137,7 @@ def item_detail(request: Request, item_id: int):
 
     item = service.get_item(conn, item_id)
     loans = service.list_loans(conn, item_id=item_id)
+    units = service.list_units(conn, item_id=item_id) if item.is_tracked else []
     return page(
         request,
         "item_detail.html",
@@ -148,7 +149,12 @@ def item_detail(request: Request, item_id: int):
         kits_using=kits.kits_containing(conn, item_id),
         holds=service.list_holds(conn, item_id=item_id, open_only=True),
         past_holds=service.list_holds(conn, item_id=item_id, open_only=False)[:20],
-        units=service.list_units(conn, item_id=item_id) if item.is_tracked else [],
+        units=units,
+        # Only units that can actually go out of the door: sound, still
+        # owned, and not already in somebody's bag. is_available covers the
+        # first two -- it is the question the condition machinery asks -- and
+        # would happily offer a camera that is already lent out.
+        lendable_units=[u for u in units if u.is_lendable],
         hold_states=HOLD_STATE_LABELS,
         barcode_svg=barcodes.render_svg(item.barcode) if item.barcode else "",
         now=db.utcnow(),
@@ -379,9 +385,14 @@ def labels(request: Request, ids: str = "", unit: str = ""):
         for item in items
         if item.barcode
     ]
-    from .deps import templates
-
-    return templates.TemplateResponse(request, "labels.html", {"items": rows})
+    # Through page(), not TemplateResponse directly. labels.html does not
+    # extend base.html, but it still has one inline <script> -- the Print
+    # button -- and that script needs the request's CSP nonce. Rendering the
+    # template straight left csp_nonce undefined, so the page shipped
+    # `<script nonce="">`, which the CSP header on the very same response
+    # refuses. The button did nothing, silently, which is the whole reason
+    # this codebase bans inline handlers.
+    return page(request, "labels.html", items=rows)
 
 
 @router.get("/export.csv")

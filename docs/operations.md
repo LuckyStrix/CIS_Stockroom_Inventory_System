@@ -181,6 +181,20 @@ configured.
 STOCKROOM_BACKUP_COPY_DIR=/mnt/stockroom-usb
 ```
 
+> **Re-run `deploy/setup-pi.sh` after setting this.** The backup unit runs
+> under `ProtectSystem=strict`, which makes everything outside
+> `/var/lib/stockroom` read-only to it — including the stick. The installer
+> reads this variable and writes
+> `/etc/systemd/system/stockroom-backup.service.d/backup-copy-dir.conf`
+> granting the path. Without that drop-in the nightly copy fails with a
+> read-only-filesystem error while the same command run by hand from an SSH
+> session works perfectly, which is a miserable thing to debug.
+> `stockroom doctor` names this specific failure if it happens.
+
+The copy is written under a `.part` name, checked with SQLite's integrity
+check, and only then renamed into place — so a stick pulled out mid-write
+leaves no truncated file wearing a backup's name.
+
 **Google Drive, or anything else rclone speaks.** rclone is a single binary
 with its own OAuth flow; the application never handles a token. Set it up once
 as the service user, because that is where the app expects the config:
@@ -203,6 +217,14 @@ STOCKROOM_BACKUP_REMOTE_KEEP=30
 An upload failure never invalidates the local snapshot, but it does make the
 command exit non-zero, so a Drive upload that has quietly stopped working
 shows up as a failed unit rather than as silence.
+
+The nightly unit runs `backup`, then `prune`, then `doctor`, and the first two
+are prefixed with `-` so systemd carries on past a failure. That is
+deliberate: `Type=oneshot` otherwise stops at the first failing step, and an
+unplugged USB stick used to take the health check down with it — so the one
+night the audit chain or the database integrity most needed looking at was the
+night nothing looked. `doctor` runs last and unprefixed, so its exit code is
+still what marks the unit failed.
 
 Pulling from another machine still works too, and needs nothing on the Pi:
 

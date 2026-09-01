@@ -18,6 +18,30 @@ def test_wal_mode_is_on(conn):
     assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
 
 
+def test_one_connection_per_thread(temp_env):
+    db.init_db()
+    assert db.connect() is db.connect()
+
+
+def test_connections_are_still_cached_after_close_all(temp_env):
+    """close_all() must not permanently disable the per-thread cache.
+
+    The empty dict it leaves behind is falsy, and a `getattr(...) or {}` reads
+    that as "no cache" -- so every later connect() opened a brand new
+    connection that nothing tracked and close_all() could never close. Every
+    test ran in that state, because conftest calls close_all() between them.
+    """
+    db.init_db()
+    db.close_all()
+
+    first = db.connect()
+    assert db.connect() is first, "connect() stopped caching after close_all()"
+
+    db.close_all()
+    with pytest.raises(sqlite3.ProgrammingError):
+        first.execute("SELECT 1")
+
+
 def test_foreign_keys_are_enforced(conn):
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(

@@ -44,6 +44,11 @@
         </td>
         <td>
           <a href="/items/{{ loan.item_id }}">{{ loan.item_name }}</a>
+          {# The screen where "is this the camera you took?" actually gets
+             asked, so the answer belongs on it. #}
+          {% if loan.asset_tag or loan.serial %}
+          <div class="mono small">{{ loan.asset_tag or loan.serial }}</div>
+          {% endif %}
           <div class="muted small">{{ loan.item_unit }} / {{ loan.item_shelf }}</div>
         </td>
         <td class="num">{{ loan.quantity }}</td>

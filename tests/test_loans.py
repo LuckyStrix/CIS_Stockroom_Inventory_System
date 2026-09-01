@@ -147,3 +147,45 @@ def test_concurrent_checkouts_cannot_oversubscribe(temp_env, actor):
 
     assert results.count("ok") == 2, results
     assert service.get_item(setup, scarce.id).available == 0
+
+
+def test_concurrent_checkouts_cannot_lend_the_same_body_twice(temp_env, actor):
+    """Four people racing for ONE camera body. Exactly one may win.
+
+    The availability check counts quantities, and with four bodies in stock it
+    would happily let all four threads take body #1. What stops them is
+    idx_loan_one_open_per_unit, so this is a test of the index rather than of
+    the transaction -- and it is the reason the index exists rather than a
+    Python-side check alone.
+    """
+    setup = db.init_db()
+    camera = service.create_item(setup, actor=actor, name="Body", quantity=4,
+                                 tracked=True)
+    body = service.create_unit(setup, actor=actor, item_id=camera.id,
+                               asset_tag="RACE-1")
+
+    results: list[str] = []
+    barrier = threading.Barrier(4)
+
+    def grab(email: str) -> None:
+        conn = db.connect()
+        barrier.wait()
+        try:
+            service.checkout(conn, actor=actor, item_id=camera.id,
+                             person_name=email, person_email=email,
+                             unit_id=body.id)
+            results.append("ok")
+        except (ConflictError, sqlite3.IntegrityError, sqlite3.OperationalError):
+            results.append("rejected")
+        finally:
+            db.close_all()
+
+    threads = [threading.Thread(target=grab, args=(f"r{i}@rit.edu",)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert not any(t.is_alive() for t in threads), "a checkout thread deadlocked"
+
+    assert results.count("ok") == 1, results
+    assert service.get_item(setup, camera.id).available == 3

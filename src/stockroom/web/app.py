@@ -36,6 +36,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import PlainTextResponse
 
 from .. import __version__, accounts, config, db, service
@@ -189,15 +190,14 @@ class HostCheckMiddleware:
         await response(scope, receive, send)
 
 
-app.add_middleware(HostCheckMiddleware)
-
-
 # ---------------------------------------------------------------------------
 # middleware
+#
+# Defined here, registered together at the bottom of this section -- see the
+# comment on that block. The order they run in is not the order they appear in.
 # ---------------------------------------------------------------------------
 
 
-@app.middleware("http")
 async def security_middleware(request: Request, call_next):
     """CSRF enforcement, a CSP nonce, and security headers, for every request.
 
@@ -207,6 +207,22 @@ async def security_middleware(request: Request, call_next):
     """
     request.state.csp_nonce = secrets.token_urlsafe(16)
 
+    def finish(response):
+        """Everything that must happen on the way out, however we got here.
+
+        The two refusals below return without ever calling the route, and they
+        return *rendered HTML*. Returning them directly skipped this, so the
+        403 "Form expired" and 413 "Too large" pages went to the browser with
+        no CSP, no X-Frame-Options and no nosniff -- the pages most likely to
+        be reached by a hostile request were the only ones with no hardening
+        on them.
+        """
+        _apply_security_headers(request, response)
+        # A page rendered for an anonymous visitor may have minted a CSRF
+        # token for its form; this is where that token reaches the browser.
+        set_csrf_cookie(response, request)
+        return response
+
     if request.method not in ("GET", "HEAD", "OPTIONS", "TRACE"):
         # Refuse an oversized body before reading it. This middleware reads the
         # whole body into memory to find the CSRF field, so without a ceiling a
@@ -214,24 +230,17 @@ async def security_middleware(request: Request, call_next):
         # this in production; development has no nginx in front of it.
         declared = request.headers.get("content-length", "")
         if declared.isdigit() and int(declared) > config.MAX_UPLOAD_BYTES:
-            return _error_page(
+            return finish(_error_page(
                 request, 413, "Too large",
                 f"That upload is larger than the "
                 f"{config.MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
-            )
+            ))
         try:
             verify_csrf(request, await _submitted_csrf(request))
         except CSRFError as exc:
-            response = _error_page(request, 403, "Form expired", str(exc))
-            set_csrf_cookie(response, request)
-            return response
+            return finish(_error_page(request, 403, "Form expired", str(exc)))
 
-    response = await call_next(request)
-    _apply_security_headers(request, response)
-    # A page rendered for an anonymous visitor may have minted a CSRF token
-    # for its form; this is where that token actually reaches the browser.
-    set_csrf_cookie(response, request)
-    return response
+    return finish(await call_next(request))
 
 
 # How far into a multipart body to look for the CSRF field. Generous enough
@@ -283,7 +292,27 @@ def _apply_security_headers(request: Request, response) -> None:
     nonce = getattr(request.state, "csp_nonce", "")
     is_html = response.headers.get("content-type", "").startswith("text/html")
 
-    if is_html:
+    # The generated public page brings its own policy and must not be given
+    # this one as well.
+    #
+    # It is a static file: written once by the publisher, served to many
+    # requests, and expected to work from a USB stick and from GitHub Pages
+    # where there is no server at all. So it cannot carry a per-request nonce,
+    # and publish/render._csp_hashes gives it a <meta> CSP built from SHA-256
+    # hashes of its own inline blocks instead -- a stricter policy than this
+    # one, and the reason test_web skips public.html in the nonce check.
+    #
+    # A browser enforces every policy it is handed and takes the intersection.
+    # Sending the nonce policy alongside the page's hash policy therefore
+    # allowed nothing: the page rendered unstyled with an empty table, silently,
+    # on every path except nginx (which serves /public/ from disk and adds no
+    # CSP of its own). Leaving it off here makes all four delivery routes --
+    # this app, nginx, file:// and Pages -- behave identically.
+    #
+    # Every other header below still applies.
+    serves_generated_page = request.url.path.startswith("/public")
+
+    if is_html and not serves_generated_page:
         # 'self' plus a nonce: no inline handlers, no third-party origins, and
         # nothing may frame this app or rewrite its base URL.
         response.headers["Content-Security-Policy"] = "; ".join([
@@ -316,7 +345,6 @@ def _apply_security_headers(request: Request, response) -> None:
         response.headers["Strict-Transport-Security"] = "max-age=31536000"
 
 
-@app.middleware("http")
 async def require_authentication(request: Request, call_next):
     """Deny anonymous access to everything not explicitly public.
 
@@ -337,6 +365,40 @@ async def require_authentication(request: Request, call_next):
                 "Your session has expired. Sign in and try again.",
             )
     return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# Middleware registration. READ THIS BEFORE ADDING ONE.
+#
+# Starlette inserts each new middleware at the FRONT of the list, so this
+# block reads backwards: the last line below is the outermost layer, and a
+# request passes through it first.
+#
+#     HostCheckMiddleware        reject a forged Host before doing any work
+#       security_middleware      CSRF in, security headers and CSP nonce out
+#         require_authentication deny-by-default for anything not public
+#           the routes
+#
+# It used to be exactly upside down, because three separate `@app.middleware`
+# decorators register in the order their `def` executes and nothing said so.
+# Two things were wrong with that:
+#
+#   * `require_authentication` was outermost, so its 401 page and its
+#     /login redirect returned WITHOUT passing back out through
+#     security_middleware -- no CSP, no X-Frame-Options, no nosniff, and no
+#     CSRF cookie for the login form it was sending people to;
+#   * the Host check was innermost, so a request to a protected path with a
+#     forged Host was answered with a 303 to /login and never reached it.
+#     Both Host tests use /health, which is public, so neither noticed.
+#
+# One consequence of the new order is deliberate: an anonymous POST to a
+# protected path with no CSRF token now gets 403 "Form expired" rather than
+# 401 "Sign in required", because CSRF is now the outer of the two checks.
+# Both are correct refusals and both now carry the security headers.
+# ---------------------------------------------------------------------------
+app.add_middleware(BaseHTTPMiddleware, dispatch=require_authentication)
+app.add_middleware(BaseHTTPMiddleware, dispatch=security_middleware)
+app.add_middleware(HostCheckMiddleware)
 
 
 # ---------------------------------------------------------------------------

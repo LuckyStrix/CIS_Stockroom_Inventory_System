@@ -24,13 +24,14 @@ others, and the caller reports them.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from . import config
+from . import config, db
 
 log = logging.getLogger(__name__)
 
@@ -86,11 +87,37 @@ class LocalDirTarget:
             raise RuntimeError(
                 f"{self.directory} is not a directory -- is the drive mounted?"
             )
-        # copy2 preserves mtime, which is what "how old is my newest backup?"
-        # reads in `stockroom doctor`.
-        shutil.copy2(snapshot, self.directory / snapshot.name)
+
+        # Copy to a temporary name, check it, and only then let it take the
+        # name a backup has.
+        #
+        # db.backup() applies exactly this rule to the local snapshot, on the
+        # stated grounds that a file which looks like a backup and is not is
+        # worse than no file at all -- and then this copied it with a bare
+        # copy2, which is neither atomic nor checked. A stick pulled out
+        # mid-write left a truncated stockroom-*.db that satisfies every
+        # existence-and-age check `stockroom doctor` makes, and is discovered
+        # to be unreadable on the one day anybody needs it.
+        target = self.directory / snapshot.name
+        partial = target.with_name(target.name + ".part")
+        try:
+            # copy2 preserves mtime, which is what "how old is my newest
+            # backup?" reads in `stockroom doctor`.
+            shutil.copy2(snapshot, partial)
+            problem = db.verify_file(partial)
+            if problem is not None:
+                raise RuntimeError(
+                    f"the copy in {self.directory} did not verify: {problem}"
+                )
+            # Atomic within a filesystem, so a reader never sees a half-copy
+            # under a name that claims to be a backup.
+            os.replace(partial, target)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
+
         self._prune()
-        log.info("copied %s to %s", snapshot.name, self.directory)
+        log.info("copied %s to %s (verified)", snapshot.name, self.directory)
 
     def existing(self) -> list[str]:
         if self.directory is None or not self.directory.is_dir():
@@ -157,6 +184,10 @@ class RcloneTarget:
             ) from exc
 
     def store(self, snapshot: Path) -> None:
+        # No .part-then-verify dance here, unlike LocalDirTarget: rclone
+        # compares checksums after a transfer and fails the command if they
+        # disagree, so an interrupted upload is already an error rather than a
+        # short file wearing a backup's name.
         if not self.remote:
             raise RuntimeError("BACKUP_REMOTE is not configured.")
         self._run("copyto", str(snapshot), f"{self.remote}/{snapshot.name}")

@@ -328,6 +328,140 @@ def test_a_unit_label_prefers_the_asset_tag(conn, actor, camera):
 
 
 # ---------------------------------------------------------------------------
+# lending an individual unit
+#
+# The `unit` table exists so that "which camera body came back with a bent
+# mount" is answerable. Until a loan could name one, it was not: the stockroom
+# knew one of four was out and nothing more.
+# ---------------------------------------------------------------------------
+
+
+def test_a_loan_can_name_which_body_went_out(conn, actor, camera, bodies, person):
+    loan = service.checkout(conn, actor=actor, item_id=camera.id,
+                            person_id=person.id, unit_id=bodies[2].id)
+
+    assert loan.unit_id == bodies[2].id
+    assert loan.asset_tag == "CIS-U-3"
+    assert service.get_unit(conn, bodies[2].id).is_on_loan
+    assert not service.get_unit(conn, bodies[0].id).is_on_loan
+
+
+def test_lending_a_unit_is_one_of_it(conn, actor, camera, bodies, person):
+    """A named physical object cannot be three of anything -- as for holds."""
+    loan = service.checkout(conn, actor=actor, item_id=camera.id,
+                            person_id=person.id, unit_id=bodies[0].id, quantity=3)
+    assert loan.quantity == 1
+    assert service.get_item(conn, camera.id).available == 3
+
+
+def test_the_same_body_cannot_go_to_two_people(conn, actor, camera, bodies, person):
+    other = service.create_person(conn, actor=actor, name="Bo", email="bo@rit.edu")
+    service.checkout(conn, actor=actor, item_id=camera.id,
+                     person_id=person.id, unit_id=bodies[0].id)
+
+    with pytest.raises(ConflictError, match="already checked out"):
+        service.checkout(conn, actor=actor, item_id=camera.id,
+                         person_id=other.id, unit_id=bodies[0].id)
+
+
+def test_a_unit_cannot_be_lent_against_the_wrong_item(conn, actor, bodies, item,
+                                                      person):
+    with pytest.raises(ValidationError, match="does not belong"):
+        service.checkout(conn, actor=actor, item_id=item.id,
+                         person_id=person.id, unit_id=bodies[0].id)
+
+
+def test_a_broken_body_cannot_be_lent(conn, actor, camera, bodies, person):
+    service.open_hold(conn, actor=actor, item_id=camera.id, state="broken",
+                      unit_id=bodies[1].id)
+    with pytest.raises(ConflictError, match="broken"):
+        service.checkout(conn, actor=actor, item_id=camera.id,
+                         person_id=person.id, unit_id=bodies[1].id)
+
+
+def test_a_retired_body_cannot_be_lent(conn, actor, camera, bodies, person):
+    service.retire_unit(conn, actor=actor, unit_id=bodies[3].id, reason="sold")
+    with pytest.raises(ConflictError, match="retired"):
+        service.checkout(conn, actor=actor, item_id=camera.id,
+                         person_id=person.id, unit_id=bodies[3].id)
+
+
+def test_returning_a_body_frees_it_for_the_next_person(conn, actor, camera,
+                                                       bodies, person):
+    loan = service.checkout(conn, actor=actor, item_id=camera.id,
+                            person_id=person.id, unit_id=bodies[0].id)
+    service.return_loan(conn, actor=actor, loan_id=loan.id)
+
+    assert service.get_unit(conn, bodies[0].id).is_lendable
+    again = service.checkout(conn, actor=actor, item_id=camera.id,
+                             person_id=person.id, unit_id=bodies[0].id)
+    assert again.unit_id == bodies[0].id
+
+
+def test_damage_on_return_is_recorded_against_that_body(conn, actor, camera,
+                                                        bodies, person):
+    """The point of the whole feature.
+
+    Marking a tracked item broken at the counter used to open a *countable*
+    hold, because the return route never passed a unit id -- so "two of the
+    four are broken, we do not know which" was the best the record could do.
+    The loan already knows which one; the hold now inherits it.
+    """
+    loan = service.checkout(conn, actor=actor, item_id=camera.id,
+                            person_id=person.id, unit_id=bodies[1].id)
+    service.return_loan(conn, actor=actor, loan_id=loan.id,
+                        condition="broken", note="bent mount")
+
+    holds = service.list_holds(conn, item_id=camera.id, open_only=True)
+    assert len(holds) == 1
+    assert holds[0].unit_id == bodies[1].id
+    assert holds[0].borrower_name == person.name, "who had it when it broke"
+    assert service.get_unit(conn, bodies[1].id).state == "broken"
+
+
+def test_which_body_went_out_is_in_the_audit_log(conn, actor, camera, bodies,
+                                                 person):
+    """The loan row is not enough. The log is what this system is for."""
+    service.checkout(conn, actor=actor, item_id=camera.id,
+                     person_id=person.id, unit_id=bodies[2].id)
+
+    event = [e for e in service.list_events(conn)
+             if e.action == "loan.checkout"][0]
+    assert "CIS-U-3" in event.summary
+    assert event.changes["unit"]["to"] == "CIS-U-3"
+    assert event.changes["unit_id"]["to"] == bodies[2].id
+
+
+def test_a_unit_loan_never_splits(conn, actor, camera, bodies, person):
+    """Half a camera body does not come back.
+
+    A partial return splits a loan rather than shrinking it, and a residual
+    row would have to decide whether to carry the unit forward -- a question
+    with no right answer. It cannot arise: a unit loan is quantity 1, so
+    there is no smaller quantity to return.
+    """
+    loan = service.checkout(conn, actor=actor, item_id=camera.id,
+                            person_id=person.id, unit_id=bodies[0].id)
+    assert loan.quantity == 1
+
+    service.return_loan(conn, actor=actor, loan_id=loan.id, quantity=1)
+
+    assert service.list_loans(conn, item_id=camera.id, open_only=True) == [], \
+        "a unit return left a residual loan behind"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM loan WHERE split_from_loan_id IS NOT NULL"
+    ).fetchone()[0] == 0
+
+
+def test_a_countable_item_still_needs_no_unit(conn, actor, item, person):
+    """Optional everywhere: most of the stockroom has no unit rows at all."""
+    loan = service.checkout(conn, actor=actor, item_id=item.id,
+                            person_id=person.id, quantity=3)
+    assert loan.unit_id is None
+    assert loan.what == f"3 x {item.name}"
+
+
+# ---------------------------------------------------------------------------
 # what the public sees
 # ---------------------------------------------------------------------------
 

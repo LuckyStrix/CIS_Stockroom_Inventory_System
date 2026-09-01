@@ -74,6 +74,18 @@ handled the transaction, which is not the same person as the borrower.
 `split_from_loan_id` links a residual loan back to the loan it was split from
 by a partial return.
 
+`unit_id` names **which** individual object went out, for an item with
+`tracked = 1`. It is NULL for everything countable, which is most of the
+stockroom. When set, the quantity is 1 by definition, and
+`idx_loan_one_open_per_unit` — a partial unique index, exactly like the one on
+`item_hold` — is what stops the same camera body being lent to two people:
+the availability check counts quantities and would happily allow it.
+
+The matching `CHECK (unit_id IS NULL OR quantity = 1)` is enforced in
+`service._checkout_locked` rather than in the table, because SQLite's
+`ALTER TABLE ADD COLUMN` cannot add a table-level constraint and a database
+that upgraded in place would silently lack it.
+
 ### `event` — the append-only audit log
 
 One row per change, written in the same transaction as the change.
@@ -102,6 +114,7 @@ change reads as `item.relocate` and the history can be filtered meaningfully.
 | `item_hold` | N units that are not lendable, and why: `broken`, `repair`, `missing` or `gone`. `loan_id` links it to the loan it came back on |
 | `kit` / `kit_item` | A named bundle. Expanded into basket lines at the counter and then forgotten — nothing is ever lent "as a kit" |
 | `stocktake` / `stocktake_scan` | One physical count, and one row per thing seen on the shelf |
+| `stocktake_result` | What a finished count found, frozen at the moment it was finished. The one derived thing this schema stores, because a completed count is an observation of a particular day rather than a live quantity — recomputing it meant March's report grew April's discrepancies |
 | `item_photo` | The index of a photo; the file itself lives under `PHOTO_DIR`, because a stockroom's worth of images would multiply the size of every nightly snapshot |
 
 Two things about `item_hold` are deliberate:

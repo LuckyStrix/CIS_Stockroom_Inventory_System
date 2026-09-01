@@ -91,11 +91,18 @@ CREATE INDEX IF NOT EXISTS idx_item_name     ON item (name COLLATE NOCASE);
 -- loan and opens a residual one for the remainder (see service.return_loan),
 -- so a row is never rewritten to a smaller quantity and the trail stays
 -- append-only. `split_from_loan_id` links a residual back to its parent.
+--
+-- `unit_id` names the individual object that went out, for items with
+-- `tracked = 1`. Without it the stockroom knew that one of four camera bodies
+-- was on loan but not which one, so "who had the body that came back with a
+-- bent mount" was unanswerable -- which is the entire reason the `unit` table
+-- exists. NULL for anything countable, which is most of the stockroom.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS loan (
     id                 INTEGER PRIMARY KEY,
     item_id            INTEGER NOT NULL REFERENCES item(id),
     person_id          INTEGER NOT NULL REFERENCES person(id),
+    unit_id            INTEGER REFERENCES unit(id),  -- NULL when countable
     quantity           INTEGER NOT NULL CHECK (quantity > 0),
     checked_out_at     TEXT    NOT NULL,
     due_at             TEXT,                 -- optional; drives the overdue list
@@ -105,6 +112,15 @@ CREATE TABLE IF NOT EXISTS loan (
     checked_out_by     TEXT    NOT NULL,     -- actor (operator), not borrower
     returned_by        TEXT,
     split_from_loan_id INTEGER REFERENCES loan(id)
+
+    -- NOTE: item_hold carries `CHECK (unit_id IS NULL OR quantity = 1)` and
+    -- this table deliberately does not, even though the same rule applies.
+    -- SQLite's ALTER TABLE ADD COLUMN cannot add a table-level CHECK, so a
+    -- database that upgraded in place would silently lack it while a fresh
+    -- one had it -- and test_a_migrated_database_matches_a_fresh_one compares
+    -- column names and types only, so nothing would catch the divergence.
+    -- The rule is enforced in service._checkout_locked instead. Indexes are
+    -- fine: they are CREATE ... IF NOT EXISTS and apply to both paths.
 );
 
 -- Partial index: the hot query is "all open loans", and it is the one the
@@ -112,6 +128,13 @@ CREATE TABLE IF NOT EXISTS loan (
 CREATE INDEX IF NOT EXISTS idx_loan_open      ON loan (item_id) WHERE returned_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_loan_person    ON loan (person_id);
 CREATE INDEX IF NOT EXISTS idx_loan_due       ON loan (due_at) WHERE returned_at IS NULL;
+
+-- One open loan per unit, exactly as idx_hold_one_open_per_unit does for
+-- holds. This is what stops the same camera body being lent to two people --
+-- the availability check counts quantities and would happily allow it -- and
+-- it is what keeps the unit_status join below single-valued.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_loan_one_open_per_unit
+    ON loan (unit_id) WHERE unit_id IS NOT NULL AND returned_at IS NULL;
 
 
 -- ---------------------------------------------------------------------------
@@ -269,8 +292,16 @@ LEFT JOIN (
 
 
 -- ---------------------------------------------------------------------------
--- unit_status: each individual unit with its current condition.
--- The LEFT JOIN is single-valued because of idx_hold_one_open_per_unit.
+-- unit_status: each individual unit with its current condition, and who has it.
+--
+-- Both LEFT JOINs are single-valued, and each has a partial unique index
+-- guaranteeing it: idx_hold_one_open_per_unit for the hold, and
+-- idx_loan_one_open_per_unit for the loan. Without those a unit could join to
+-- two open rows and every unit would silently appear twice.
+--
+-- `state` is the unit's condition and says nothing about whether it is lent
+-- out; `loan_id` is the other half of the question. A unit is lendable only
+-- when both are clear -- see models.Unit.is_lendable.
 -- ---------------------------------------------------------------------------
 DROP VIEW IF EXISTS unit_status;
 CREATE VIEW unit_status AS
@@ -280,10 +311,15 @@ SELECT
     i.barcode              AS item_barcode,
     COALESCE(h.state, 'ok') AS state,
     h.note                 AS state_note,
-    h.id                   AS hold_id
+    h.id                   AS hold_id,
+    l.id                   AS loan_id,
+    p.name                 AS borrower_name,
+    l.due_at               AS loan_due_at
 FROM unit u
 JOIN item i ON i.id = u.item_id
-LEFT JOIN item_hold h ON h.unit_id = u.id AND h.closed_at IS NULL;
+LEFT JOIN item_hold h ON h.unit_id = u.id AND h.closed_at IS NULL
+LEFT JOIN loan l ON l.unit_id = u.id AND l.returned_at IS NULL
+LEFT JOIN person p ON p.id = l.person_id;
 
 
 -- ---------------------------------------------------------------------------
@@ -310,6 +346,10 @@ LEFT JOIN person p ON p.id = l.person_id;
 -- ---------------------------------------------------------------------------
 -- loan_detail: open and closed loans joined to their item and person.
 -- Used by the dashboard, the person page and the item page.
+--
+-- Careful with the word "unit" here: `item_unit` is the storage cabinet the
+-- item lives in, and `asset_tag`/`serial` identify the individual object that
+-- went out. Named as in hold_detail, which had to make the same distinction.
 -- ---------------------------------------------------------------------------
 DROP VIEW IF EXISTS loan_detail;
 CREATE VIEW loan_detail AS
@@ -320,10 +360,13 @@ SELECT
     i.unit    AS item_unit,
     i.shelf   AS item_shelf,
     p.name    AS person_name,
-    p.email   AS person_email
+    p.email   AS person_email,
+    u.asset_tag,
+    u.serial
 FROM loan l
 JOIN item   i ON i.id = l.item_id
-JOIN person p ON p.id = l.person_id;
+JOIN person p ON p.id = l.person_id
+LEFT JOIN unit u ON u.id = l.unit_id;
 
 
 -- ---------------------------------------------------------------------------
@@ -425,6 +468,39 @@ CREATE TABLE IF NOT EXISTS stocktake_scan (
 
 CREATE INDEX IF NOT EXISTS idx_stocktake_scan_session
     ON stocktake_scan (stocktake_id);
+
+
+-- ---------------------------------------------------------------------------
+-- stocktake_result: what a finished count actually found, frozen.
+--
+-- The rest of this schema stores nothing derived, and for good reason. This
+-- table is the exception, because a finished stocktake's findings are not a
+-- derived quantity at all -- they are a historical observation, and the whole
+-- point of walking the room was to record what was on the shelves on that day.
+--
+-- Recomputing them instead meant a report that changed every time stock moved:
+-- open March's count in April and it lists discrepancies that are simply
+-- April's loans. Written once by stocktake.finish_stocktake, inside the same
+-- transaction that closes the session, and never updated.
+--
+-- `item_name`, `barcode` and `location` are copied rather than joined so the
+-- report still reads as it did on the day after an item is renamed or moved.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS stocktake_result (
+    stocktake_id INTEGER NOT NULL REFERENCES stocktake(id),
+    item_id      INTEGER NOT NULL REFERENCES item(id),
+    item_name    TEXT    NOT NULL,
+    barcode      TEXT,
+    location     TEXT    NOT NULL DEFAULT '',
+    expected     INTEGER NOT NULL,
+    counted      INTEGER NOT NULL,
+    -- Which list this row belonged to. 'unscanned' is deliberately distinct
+    -- from 'short': the likeliest cause is a shelf nobody walked.
+    kind         TEXT    NOT NULL
+                 CHECK (kind IN ('matched', 'short', 'over', 'unscanned')),
+
+    PRIMARY KEY (stocktake_id, item_id)
+);
 
 
 -- ---------------------------------------------------------------------------

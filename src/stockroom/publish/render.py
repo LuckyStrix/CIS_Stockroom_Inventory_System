@@ -125,8 +125,8 @@ def render_json(conn: sqlite3.Connection) -> str:
     return json.dumps(build_payload(conn), indent=2, sort_keys=True) + "\n"
 
 
-def _csp_hashes(html: str) -> list[str]:
-    """SHA-256 hashes of every inline <script> and <style> block in the page.
+def _csp_hashes(html: str) -> tuple[list[str], list[str]]:
+    """Hashes for script-src and style-src, as ``(scripts, styles)``.
 
     The public page is a single self-contained file that may be opened from
     disk or served by GitHub Pages, so there is no server to mint a per-request
@@ -134,20 +134,37 @@ def _csp_hashes(html: str) -> list[str]:
     case: the policy names the scripts allowed to run, and anything injected
     later -- an item description that escaped, a tampered copy of the file --
     does not match and does not execute.
+
+    Two directives, two lists. Feeding one combined list to both was harmless
+    but wrong in a way worth avoiding: it put the *data* block's hash into
+    script-src, and that block is the one thing on the page whose contents
+    change with the inventory, so the policy string churned on every publish.
+
+    A ``<script>`` with a non-executable ``type`` (the embedded
+    ``application/json`` payload) is skipped -- the browser never runs it, so
+    ``script-src`` never consults it.
     """
     import base64
     import hashlib
     import re
 
-    hashes = []
-    for pattern in (
-        r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>",
-        r"<style[^>]*>(.*?)</style>",
-    ):
-        for block in re.findall(pattern, html, re.S):
-            digest = hashlib.sha256(block.encode("utf-8")).digest()
-            hashes.append(f"'sha256-{base64.b64encode(digest).decode()}'")
-    return hashes
+    def digest(block: str) -> str:
+        raw = hashlib.sha256(block.encode("utf-8")).digest()
+        return f"'sha256-{base64.b64encode(raw).decode()}'"
+
+    scripts = [
+        digest(body)
+        for attrs, body in re.findall(
+            r"<script(?![^>]*\bsrc=)([^>]*)>(.*?)</script>", html, re.S
+        )
+        # No type at all, or type="module"/"text/javascript", is executable.
+        # Anything else -- application/json here -- is inert data.
+        if not re.search(r'\btype\s*=\s*"(?!module|text/javascript)', attrs)
+    ]
+    styles = [
+        digest(body) for body in re.findall(r"<style[^>]*>(.*?)</style>", html, re.S)
+    ]
+    return scripts, styles
 
 
 def render_site(conn: sqlite3.Connection) -> dict[str, str]:
@@ -170,11 +187,11 @@ def render_site(conn: sqlite3.Connection) -> dict[str, str]:
 
     # Two passes: the policy has to name the hashes of the very blocks the
     # first pass produced, so render once to obtain them and once to embed them.
-    hashes = _csp_hashes(html)
+    script_hashes, style_hashes = _csp_hashes(html)
     policy = "; ".join([
         "default-src 'none'",
-        f"script-src {' '.join(h for h in hashes if h)}",
-        f"style-src {' '.join(hashes)}",
+        f"script-src {' '.join(script_hashes)}",
+        f"style-src {' '.join(style_hashes)}",
         "img-src 'self' data:",
         "connect-src 'self'",
         "base-uri 'none'",

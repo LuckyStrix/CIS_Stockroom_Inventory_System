@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 
 from .. import db, service
 from ..service import StockroomError
-from .deps import get_conn, page, redirect, require_staff
+from .deps import get_conn, page, redirect, require_staff, safe_path
 
 router = APIRouter()
 
@@ -39,6 +39,7 @@ def checkout(
     quantity: int = Form(1),
     due_at: str = Form(""),
     note: str = Form(""),
+    unit_id: str = Form(""),
 ):
     """Lend units of an item.
 
@@ -57,6 +58,10 @@ def checkout(
         loan = service.checkout(
             conn, actor=actor, item_id=item_id,
             person_name=name, person_email=person_email,
+            # Blank means "not recorded", which is the honest answer for an
+            # item nobody has tagged yet and the only option for a countable
+            # one. The service layer validates a real id.
+            unit_id=int(unit_id) if unit_id.strip() else None,
             quantity=quantity,
             # <input type="date"> gives YYYY-MM-DD; store end-of-day UTC so a
             # loan is not overdue at midnight on the morning it is due.
@@ -86,8 +91,14 @@ def return_loan(
     ``condition`` marks what came back as not fit to lend again, in the same
     transaction. The moment a student hands over a dented lens is the only
     moment anyone will reliably record it, so it is one form, not two.
+
+    ``next`` arrives in the form and is therefore attacker-controlled, so it
+    goes through safe_path like every other caller-supplied destination. Handed
+    to redirect() raw, this route was an open redirect: a POST carrying
+    next=https://evil.example/ answered 303 to that host.
     """
     actor = require_staff(request).as_actor()
+    destination = safe_path(next, "/loans")
     try:
         loan = service.return_loan(
             get_conn(), actor=actor, loan_id=loan_id,
@@ -96,10 +107,11 @@ def return_loan(
             condition=condition.strip() or None,
         )
     except (StockroomError, ValueError) as exc:
-        return redirect(next, error=str(exc))
+        return redirect(destination, error=str(exc))
     if condition.strip():
-        return redirect(next, ok=(
+        return redirect(destination, ok=(
             f"Returned {loan.item_name} from {loan.person_name}, marked "
             f"{condition.strip()}."
         ))
-    return redirect(next, ok=f"Returned {loan.item_name} from {loan.person_name}.")
+    return redirect(destination,
+                    ok=f"Returned {loan.item_name} from {loan.person_name}.")

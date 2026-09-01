@@ -44,6 +44,12 @@ say "we own ten, two are unaccounted for" rather than quietly becoming eight.
 Every availability figure in the app, the CLI, the kits, the stocktake and the
 public page comes through that one view.
 
+A loan may also name **which** physical object went out (`loan.unit_id`), for
+items with `tracked = 1`. That does not change the arithmetic above — a unit
+loan is quantity 1 like any other — but it is what makes "who had the body
+that came back with a bent mount" answerable. Optional everywhere: most of the
+stockroom is countable and has no `unit` rows at all.
+
 ## Security invariants
 
 Two tests in `tests/test_authz.py` enumerate the application's real route table:
@@ -107,7 +113,26 @@ Other things that are load-bearing:
 - **`config.PUBLISH_DIR` is read per request**, not bound at import. `/public`
   is a route rather than a `StaticFiles` mount for exactly this reason.
 - **A partial return splits the loan**, it does not shrink it. Loan rows are
-  never rewritten to a smaller quantity.
+  never rewritten to a smaller quantity. A *unit* loan is quantity 1, so it
+  can never split — and must not, since a residual row would have to decide
+  whether to carry the unit forward.
+- **The generated public page carries its own CSP and must keep it.**
+  `render._csp_hashes` builds a `<meta>` policy from SHA-256 hashes of the
+  page's own inline `<style>` and `<script>`, because a file opened from a USB
+  stick or GitHub Pages has no server to mint a nonce. `_apply_security_headers`
+  therefore skips `/public` — a browser enforces every policy it is handed and
+  takes the intersection, so adding the app's nonce policy allowed *neither*
+  block and the page rendered unstyled and empty. Covered by
+  `test_the_app_does_not_override_the_public_pages_own_policy`.
+- **Middleware order is registration order reversed.** `add_middleware`
+  inserts at the front, so the last registration is the outermost layer. They
+  are registered in one explicit block at the bottom of `web/app.py`; read the
+  comment there before adding one. Getting it wrong is silent: the auth gate
+  once sat outside the headers middleware, so every refusal it produced went
+  out with no CSP and no `nosniff`.
+- **Every response that leaves `security_middleware` must go through
+  `finish()`**, including the early CSRF and oversize refusals. Returning one
+  directly skips the security headers.
 
 ## Layout
 
@@ -128,7 +153,7 @@ The phase 2 and phase 3 additions are listed below; the short version is that
 ## Testing
 
 ```bash
-.venv/bin/pytest              # 649 tests, ~4min
+.venv/bin/pytest              # 700 tests, ~2min
 ```
 
 `tests/test_web.py` drives real HTTP requests through the actual routes and
@@ -159,12 +184,32 @@ web/routes_counter.py  routes_kits.py  routes_stocktake.py  routes_admin.py
 tests/fixtures/schema_v2.sql   <- what an upgrading Pi actually has
 ```
 
+## Layout additions (phase 4)
+
+Nothing new here is a module; phase 4 is repairs plus one feature.
+
+```
+loan.unit_id           <- which physical object went out (schema v4)
+stocktake_result       <- what a finished count found, frozen
+search.resolve()       <- barcode OR asset tag -> Scan(item, unit)
+```
+
+`SCHEMA_VERSION` is **4**. `search.resolve_scan()` still exists and still
+returns an `Item`; call `resolve()` when knowing *which* one matters.
+
 ### Things phase 3 added that are easy to get wrong
 
 - **`db._ADDED_COLUMNS` and `schema.sql` must agree.** A new column has to be
   written twice — in `schema.sql` for fresh databases and in `_ADDED_COLUMNS`
   for existing ones. `test_a_migrated_database_matches_a_fresh_one` compares
   them; without it, a Pi upgrading in place quietly lacks the column.
+- **`ALTER TABLE` cannot add a table-level `CHECK`.** So a constraint written
+  into `schema.sql` reaches a fresh database and silently misses an upgrading
+  one — and `test_a_migrated_database_matches_a_fresh_one` compares column
+  names and types only, so it will not catch the drift. `loan` needs
+  `unit_id IS NULL OR quantity = 1` and enforces it in
+  `service._checkout_locked` for exactly this reason. Indexes are fine; they
+  are `CREATE ... IF NOT EXISTS` and run after `_ensure_columns`.
 - **The audit log is a hash chain.** `log_event` inserts then hashes in the
   same transaction, which is race-free only because `BEGIN IMMEDIATE` already
   serialises writers. `rebuild_audit_chain` is called by the migration and
@@ -175,7 +220,13 @@ tests/fixtures/schema_v2.sql   <- what an upgrading Pi actually has
 - **`list_storage_units` vs `list_units`.** "Unit" means two things here: a
   storage cabinet (`item.unit`) and one physical object (the `unit` table).
   Two functions called `list_units` once shadowed each other silently — see
-  `tests/test_source_hygiene.py`.
+  `tests/test_source_hygiene.py`. The same trap is in the views: `loan_detail`
+  has both `item_unit` (the cabinet) and `asset_tag`/`serial` (the object).
+- **`Unit.is_available` and `Unit.is_lendable` are different questions.**
+  `is_available` means sound and still owned — what the condition machinery
+  asks before opening a hold. `is_lendable` adds "and not already in somebody
+  else's bag". Offering `is_available` units in a checkout picker hands out
+  cameras that are already out.
 - **Multipart CSRF is bounded.** `_submitted_csrf` scans only the first 16 KB
   of a multipart body, so `_csrf` must be the **first field** in any form that
   can carry a file. `test_the_csrf_field_comes_first` enforces it.

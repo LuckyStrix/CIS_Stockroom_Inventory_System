@@ -56,6 +56,18 @@ from .service import (
 IDLE_TIMEOUT_HOURS = config.SESSION_IDLE_HOURS
 ABSOLUTE_TIMEOUT_DAYS = config.SESSION_MAX_DAYS
 
+# How stale the heartbeat may get before resolve_session writes it back.
+#
+# That write is not free: db.transaction() is BEGIN IMMEDIATE, so it takes the
+# database's single write lock. Doing it on every authenticated request meant
+# that loading any page could block a checkout at the counter for up to
+# busy_timeout, and put a write on the SD card for every navigation.
+#
+# The window it maintains is eight hours. Letting the stored value lag by a
+# minute costs nothing anybody can perceive and removes the write from all but
+# one request a minute per session.
+HEARTBEAT_SECONDS = 60
+
 ROLES = ("requester", "staff", "admin")
 STATUSES = ("pending", "active", "disabled")
 
@@ -484,8 +496,13 @@ def login(
 
     lockout = security.check_lockout(conn, email=email, ip=ip)
     if lockout.locked:
+        # Deliberately NOT recorded as a failed attempt. The password was
+        # never checked, so there is nothing to count -- and counting it fed
+        # the very window that caused the lockout, which made the lockout
+        # self-sustaining: five guesses every fifteen minutes kept any staff
+        # account locked out permanently, with no way to clear it. The event
+        # below still records that someone tried.
         with db.transaction(conn):
-            security.record_attempt(conn, email=email, ip=ip, success=False)
             log_event(
                 conn,
                 actor=Actor(name=email or "unknown", email=email),
@@ -596,9 +613,10 @@ def resolve_session(
 ) -> tuple[Session, Account] | None:
     """Look up a live session by its cookie token, or None.
 
-    Also slides the idle expiry forward. That write is the audit rule's one
-    documented exception: a heartbeat is not a domain change, and recording
-    every page view would bury the inventory history.
+    Also slides the idle expiry forward, at most once every
+    :data:`HEARTBEAT_SECONDS`. That write is the audit rule's one documented
+    exception: a heartbeat is not a domain change, and recording every page
+    view would bury the inventory history.
     """
     if not token:
         return None
@@ -621,17 +639,34 @@ def resolve_session(
         # Disabled between requests: stop honouring the session immediately.
         return None
 
-    fresh = (
-        datetime.now(timezone.utc) + timedelta(hours=IDLE_TIMEOUT_HOURS)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Never extend past the absolute cap.
-    new_expiry = min(fresh, session.absolute_expires_at)
-    with db.transaction(conn):
-        conn.execute(
-            "UPDATE session SET last_seen_at = ?, expires_at = ? WHERE id = ?",
-            (now, new_expiry, session.id),
-        )
+    if _seconds_since(session.last_seen_at, now) >= HEARTBEAT_SECONDS:
+        fresh = (
+            datetime.now(timezone.utc) + timedelta(hours=IDLE_TIMEOUT_HOURS)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Never extend past the absolute cap.
+        new_expiry = min(fresh, session.absolute_expires_at)
+        with db.transaction(conn):
+            conn.execute(
+                "UPDATE session SET last_seen_at = ?, expires_at = ? WHERE id = ?",
+                (now, new_expiry, session.id),
+            )
     return session, account
+
+
+def _seconds_since(stamp: str, now: str) -> float:
+    """How long ago ``stamp`` was, given ``now``, both db.utcnow() strings.
+
+    A malformed or future stamp reads as "long ago", so the heartbeat writes
+    rather than skips -- the failure that costs a write is much better than
+    the one that lets a session drift towards an expiry that never moves.
+    """
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    try:
+        then = datetime.strptime(stamp, fmt)
+        current = datetime.strptime(now, fmt)
+    except (TypeError, ValueError):
+        return float("inf")
+    return (current - then).total_seconds()
 
 
 def logout(conn: sqlite3.Connection, *, token: str, actor: Actor | None = None) -> None:

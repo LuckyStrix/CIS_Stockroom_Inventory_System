@@ -92,11 +92,25 @@
         <input id="person_name" name="person_name" autocomplete="off">
       </div>
       <div class="row">
+        {% if item.is_tracked and lendable_units %}
+        <div class="field">
+          <label for="checkout_unit">Which one</label>
+          <select id="checkout_unit" name="unit_id">
+            <option value="">Not recorded</option>
+            {% for u in lendable_units %}
+            <option value="{{ u.id }}">{{ u.label }}</option>
+            {% endfor %}
+          </select>
+          <div class="hint">Scanning the asset tag at the counter fills this in.</div>
+        </div>
+        <input type="hidden" name="quantity" value="1">
+        {% else %}
         <div class="field">
           <label for="qty">Quantity</label>
           <input id="qty" name="quantity" type="number" value="1" min="1" max="{{ item.available }}" required>
           <div class="hint">{{ item.available }} available</div>
         </div>
+        {% endif %}
         <div class="field">
           <label for="due">Due back <span class="hint">(optional)</span></label>
           <input id="due" name="due_at" type="date">
@@ -281,13 +295,23 @@
 <div class="tablewrap">
 {% if units %}
 <table>
-  <thead><tr><th>Asset tag</th><th>Serial</th><th>Condition</th><th>Note</th><th></th></tr></thead>
+  <thead><tr><th>Asset tag</th><th>Serial</th><th>Condition</th><th>Where it is</th><th>Note</th><th></th></tr></thead>
   <tbody>
     {% for u in units %}
     <tr>
       <td class="mono">{{ u.asset_tag|show }}</td>
       <td class="mono muted">{{ u.serial|show }}</td>
       <td><span class="pill {{ u.state|hold_class }}">{{ u.state_label }}</span></td>
+      <td class="nowrap">
+        {% if u.is_on_loan %}
+          <a href="/loans">Out with {{ u.borrower_name }}</a>
+          {% if u.loan_due_at %}<div class="muted small">due {{ u.loan_due_at|date }}</div>{% endif %}
+        {% elif u.is_retired %}
+          <span class="muted">—</span>
+        {% else %}
+          <span class="muted">On the shelf</span>
+        {% endif %}
+      </td>
       <td class="muted">{{ u.state_note or u.note or "—" }}</td>
       <td class="nowrap">
         <form method="post" action="/units/{{ u.id }}/retire"
@@ -338,7 +362,7 @@
 <div class="tablewrap">
 {% if open_loans %}
 <table>
-  <thead><tr><th>Borrower</th><th class="num">Qty</th><th>Out since</th><th>Due</th><th></th></tr></thead>
+  <thead><tr><th>Which one</th><th>Borrower</th><th class="num">Qty</th><th>Out since</th><th>Due</th><th></th></tr></thead>
   <tbody>{{ loan_rows(open_loans, now, show_item=False) }}</tbody>
 </table>
 {% else %}<div class="empty">Every unit is on the shelf.</div>{% endif %}
@@ -348,11 +372,12 @@
 <div class="tablewrap">
 {% if past_loans %}
 <table>
-  <thead><tr><th>Borrower</th><th class="num">Qty</th><th>Out</th><th>Returned</th><th>Note</th></tr></thead>
+  <thead><tr><th>Borrower</th><th>Which one</th><th class="num">Qty</th><th>Out</th><th>Returned</th><th>Note</th></tr></thead>
   <tbody>
     {% for loan in past_loans %}
     <tr>
       <td><a href="/people/{{ loan.person_id }}">{{ loan.person_name }}</a></td>
+      <td class="mono small">{{ (loan.asset_tag or loan.serial)|show }}</td>
       <td class="num">{{ loan.quantity }}</td>
       <td class="nowrap muted">{{ loan.checked_out_at|datetime }}</td>
       <td class="nowrap muted">{{ loan.returned_at|datetime }}</td>

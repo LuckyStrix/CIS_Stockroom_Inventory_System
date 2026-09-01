@@ -62,9 +62,14 @@ CSRF_COOKIE = "stockroom_csrf"
 # that enumerates routes uses this same list, so it cannot drift from reality.
 PUBLIC_PATHS = frozenset({
     "/login", "/logout", "/register", "/health",
+    # The bare path is its own route: a 307 to /public/. It is listed here
+    # rather than as a prefix because a bare "/public" prefix also matches
+    # "/public-holidays" and "/publicfoo", quietly exempting any future route
+    # whose path merely starts with those seven characters.
+    "/public",
     "/openapi.json", "/api/docs", "/redoc", "/docs/oauth2-redirect",
 })
-PUBLIC_PREFIXES = ("/static/", "/public/", "/public")
+PUBLIC_PREFIXES = ("/static/", "/public/")
 
 
 def is_public_path(path: str) -> bool:

@@ -96,6 +96,38 @@ def test_an_oversized_upload_is_refused_before_decoding(temp_env, monkeypatch):
         photos.store(jpeg((2000, 1500)))
 
 
+def test_a_decompression_bomb_is_refused(temp_env):
+    """A tiny file declaring an enormous canvas is a bad upload, not a crash.
+
+    20000x20000 is 400 megapixels -- over a gigabyte decoded -- from 400 KB of
+    PNG, which is comfortably inside every size limit this system has. Pillow
+    raises DecompressionBombError, which is not an OSError, so it used to
+    escape store() entirely and reach the browser as a 500.
+    """
+    buffer = io.BytesIO()
+    Image.new("L", (20000, 20000)).save(buffer, "PNG")
+    payload = buffer.getvalue()
+    assert len(payload) < config.MAX_UPLOAD_BYTES, "the size guard must not be what stops it"
+
+    with pytest.raises(PhotoError, match="too large"):
+        photos.store(payload)
+
+
+def test_an_image_below_pillows_hard_limit_is_still_refused(temp_env):
+    """The dangerous band: big enough to exhaust a Pi, small enough to only warn.
+
+    Between 1x and 2x MAX_IMAGE_PIXELS Pillow decodes with nothing but a
+    warning, which on a machine with a gigabyte of RAM is the half that
+    actually takes the service down.
+    """
+    edge = int((Image.MAX_IMAGE_PIXELS * 1.2) ** 0.5)
+    buffer = io.BytesIO()
+    Image.new("L", (edge, edge)).save(buffer, "PNG")
+
+    with pytest.raises(PhotoError, match="too large"):
+        photos.store(buffer.getvalue())
+
+
 @pytest.mark.parametrize(
     "name", ["../../etc/passwd", "sub/dir.jpg", "..\\\\windows", "", ".hidden"],
 )
@@ -292,6 +324,20 @@ def test_uploading_something_that_is_not_an_image_is_a_message_not_a_500(client,
     )
     assert response.status_code == 200
     assert "not an image" in response.text
+
+
+def test_uploading_a_decompression_bomb_is_a_message_not_a_500(client, stocked):
+    buffer = io.BytesIO()
+    Image.new("L", (20000, 20000)).save(buffer, "PNG")
+
+    response = client.post(
+        f"/items/{stocked}/photos",
+        data={"_csrf": csrf(client, f"/items/{stocked}")},
+        files={"photo": ("huge.png", buffer.getvalue(), "image/png")},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "too large" in response.text
 
 
 def test_submitting_the_form_with_no_file_says_so(client, stocked):

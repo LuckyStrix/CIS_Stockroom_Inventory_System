@@ -207,12 +207,47 @@ def check_offsite_backups(*, skip_remote: bool = False) -> Check:
             parts.append(f"{target.name}: unreachable ({exc})")
             worst = FAIL
             continue
-        if not found:
+
+        # "empty" is the symptom of several different problems, and by far the
+        # most confusing one is a directory the nightly job cannot write to:
+        # the backup unit runs under ProtectSystem=strict, so a copy directory
+        # outside /var/lib/stockroom is read-only to it while the identical
+        # command in an SSH session works. Naming that here is the difference
+        # between a five-minute fix and an afternoon.
+        unwritable = _unwritable_reason(target)
+        if unwritable:
+            parts.append(f"{target.name}: {unwritable}")
+            worst = FAIL
+        elif not found:
             parts.append(f"{target.name}: empty")
             worst = FAIL
         else:
             parts.append(f"{target.name}: {len(found)}, newest {found[-1]}")
     return Check("off-box backups", worst, "; ".join(parts))
+
+
+def _unwritable_reason(target) -> str:
+    """Why this target cannot be written to, or '' if it can.
+
+    Only meaningful for a local directory; a remote's reachability is already
+    covered by existing() raising.
+    """
+    directory = getattr(target, "directory", None)
+    if directory is None:
+        return ""
+    if not directory.is_dir():
+        return f"{directory} is not a directory -- is the drive mounted?"
+    probe = directory / ".stockroom-write-test"
+    try:
+        probe.touch()
+        probe.unlink()
+    except OSError as exc:
+        return (
+            f"{directory} is not writable ({exc.strerror}). If this is the "
+            "nightly job, the unit needs ReadWritePaths for that path -- "
+            "re-run deploy/setup-pi.sh"
+        )
+    return ""
 
 
 def check_publish(conn: sqlite3.Connection | None = None) -> Check:

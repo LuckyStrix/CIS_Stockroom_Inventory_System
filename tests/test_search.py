@@ -81,3 +81,55 @@ def test_barcode_svg_is_renderable(item):
     assert svg.startswith("<svg")
     assert "mm" in svg          # physical dimensions preserved for printing
     assert barcodes.render_svg("") == ""
+
+
+# ---------------------------------------------------------------------------
+# asset tags
+#
+# Scanning an item barcode says what kind of thing it is; scanning an asset
+# tag says which one. Only the stocktake understood the second, so the counter
+# and the CLI answered "nothing matched" for a tag the stocktake accepted.
+# ---------------------------------------------------------------------------
+
+
+def _tracked_camera(conn, actor):
+    camera = service.create_item(conn, actor=actor, name="Canon EOS R5",
+                                 quantity=2, tracked=True)
+    unit = service.create_unit(conn, actor=actor, item_id=camera.id,
+                               asset_tag="CIS-U-7", serial="SN0007")
+    return camera, unit
+
+
+def test_an_asset_tag_resolves_to_its_item_and_unit(conn, actor):
+    camera, unit = _tracked_camera(conn, actor)
+
+    found = search.resolve(conn, "CIS-U-7")
+    assert found is not None
+    assert found.item.id == camera.id
+    assert found.unit is not None and found.unit.id == unit.id
+    assert found.names_a_unit
+
+
+def test_an_asset_tag_scan_is_case_insensitive_like_a_barcode(conn, actor):
+    _tracked_camera(conn, actor)
+    found = search.resolve(conn, "cis-u-7")
+    assert found is not None and found.names_a_unit
+
+
+def test_an_item_barcode_resolves_without_naming_a_unit(conn, item):
+    found = search.resolve(conn, item.barcode)
+    assert found is not None
+    assert found.item.id == item.id
+    assert found.unit is None
+    assert not found.names_a_unit
+
+
+def test_resolve_scan_still_answers_with_the_item(conn, actor):
+    """The old entry point keeps its shape for callers that only want the item."""
+    camera, _ = _tracked_camera(conn, actor)
+    assert search.resolve_scan(conn, "CIS-U-7").id == camera.id
+
+
+def test_an_unknown_code_resolves_to_nothing(conn, item):
+    assert search.resolve(conn, "NOT-A-THING-AT-ALL") is None
+    assert search.resolve(conn, "") is None

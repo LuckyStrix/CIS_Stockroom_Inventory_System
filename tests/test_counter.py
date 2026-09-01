@@ -144,6 +144,26 @@ def test_returning_nothing_is_refused(conn, actor):
         service.return_many(conn, actor=actor, loan_ids=[])
 
 
+def test_a_batch_cannot_mix_two_peoples_loans(conn, actor, item, tripod, person):
+    """The batch event names one borrower, so the batch must have only one.
+
+    Otherwise the audit log reads "Alice returned 2 item(s): 1 x Tripod,
+    1 x Camera" when the tripod was Bob's -- a sentence that is simply false,
+    written into the record this whole system exists to keep.
+    """
+    other = service.create_person(conn, actor=actor, name="Bob", email="bob@rit.edu")
+    hers = service.checkout(conn, actor=actor, item_id=item.id,
+                            person_id=person.id, quantity=1)
+    his = service.checkout(conn, actor=actor, item_id=tripod.id,
+                           person_id=other.id, quantity=1)
+
+    with pytest.raises(ValidationError, match="same person"):
+        service.return_many(conn, actor=actor, loan_ids=[hers.id, his.id])
+
+    assert service.get_loan(conn, hers.id).is_open
+    assert service.get_loan(conn, his.id).is_open
+
+
 def test_open_loans_for_a_person_and_item_come_back_oldest_first(conn, actor,
                                                                  item, person):
     first = service.checkout(conn, actor=actor, item_id=item.id,
@@ -447,3 +467,108 @@ def test_the_kit_pages_render(client, stock):
     body = client.get(f"/kits/{kit.id}").text
     assert "Canon EOS R5" in body
     assert "Save contents" in body
+
+
+# ---------------------------------------------------------------------------
+# scanning an asset tag at the counter
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tracked_stock(client):
+    """A tracked item with two individually tagged bodies."""
+    conn = db.connect()
+    camera = service.create_item(conn, actor=SETUP, name="Canon EOS R5",
+                                 quantity=2, unit="Unit A", shelf="Shelf 1",
+                                 tracked=True)
+    first = service.create_unit(conn, actor=SETUP, item_id=camera.id,
+                                asset_tag="CIS-U-11")
+    second = service.create_unit(conn, actor=SETUP, item_id=camera.id,
+                                 asset_tag="CIS-U-12")
+    return camera, first, second
+
+
+def test_scanning_an_asset_tag_puts_that_body_in_the_basket(client, tracked_stock):
+    """The stocktake understood asset tags; the counter did not."""
+    camera, first, _ = tracked_stock
+
+    body = counter_post(client, "/counter/add", {"code": "CIS-U-11"}).text
+    assert "CIS-U-11" in body, "the basket does not say which body it is"
+    assert f'name="unit_id" value="{first.id}"' in body
+
+
+def test_two_bodies_of_one_item_are_two_basket_lines(client, tracked_stock):
+    """Two cameras are two objects, not "two of a camera"."""
+    camera, first, second = tracked_stock
+
+    counter_post(client, "/counter/add", {"code": "CIS-U-11"})
+    body = counter_post(client, "/counter/add", {
+        "code": "CIS-U-12",
+        "item_id": [str(camera.id)],
+        "quantity": ["1"],
+        "unit_id": [str(first.id)],
+    }).text
+
+    assert body.count(f'name="unit_id" value="{first.id}"') == 1
+    assert body.count(f'name="unit_id" value="{second.id}"') == 1
+
+
+def test_scanning_the_same_tag_twice_is_not_two_of_that_camera(client,
+                                                               tracked_stock):
+    camera, first, _ = tracked_stock
+
+    counter_post(client, "/counter/add", {"code": "CIS-U-11"})
+    body = counter_post(client, "/counter/add", {
+        "code": "CIS-U-11",
+        "item_id": [str(camera.id)],
+        "quantity": ["1"],
+        "unit_id": [str(first.id)],
+    }).text
+
+    assert body.count(f'name="unit_id" value="{first.id}"') == 1
+
+
+def test_checking_the_basket_out_records_which_body_went(client, tracked_stock):
+    camera, first, _ = tracked_stock
+
+    counter_post(client, "/counter/checkout", {
+        "item_id": [str(camera.id)],
+        "quantity": ["1"],
+        "unit_id": [str(first.id)],
+        "borrower": "wren@rit.edu",
+        "borrower_name": "Wren",
+    })
+
+    conn = db.connect()
+    loans = service.list_loans(conn, open_only=True)
+    assert len(loans) == 1
+    assert loans[0].unit_id == first.id
+    assert service.get_unit(conn, first.id).is_on_loan
+
+
+def test_a_body_already_out_cannot_be_scanned_again(client, tracked_stock):
+    camera, first, _ = tracked_stock
+    conn = db.connect()
+    person = service.get_or_create_person(conn, actor=SETUP, name="Wren",
+                                          email="wren@rit.edu")
+    service.checkout(conn, actor=SETUP, item_id=camera.id,
+                     person_id=person.id, unit_id=first.id)
+
+    body = counter_post(client, "/counter/add", {"code": "CIS-U-11"}).text
+    assert "already checked out" in body
+    assert "Wren" in body
+
+
+def test_removing_one_body_leaves_the_other_in_the_basket(client, tracked_stock):
+    """`drop` used to name an item, which with units names several lines."""
+    camera, first, second = tracked_stock
+
+    body = counter_post(client, "/counter/remove", {
+        "drop": f"{camera.id}:{first.id}",
+        "item_id": [str(camera.id), str(camera.id)],
+        "quantity": ["1", "1"],
+        "unit_id": [str(first.id), str(second.id)],
+    }).text
+
+    assert f'name="unit_id" value="{first.id}"' not in body
+    assert f'name="unit_id" value="{second.id}"' in body

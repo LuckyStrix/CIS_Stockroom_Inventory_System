@@ -40,7 +40,16 @@
   <tr>
     {% if show_item %}
     <td><a href="/items/{{ loan.item_id }}">{{ loan.item_name }}</a>
+      {# Which individual object went out, when the item is tracked. "unit"
+         means two different things here: item_unit is the storage cabinet. #}
+      {% if loan.asset_tag or loan.serial %}
+      <div class="mono small">{{ loan.asset_tag or loan.serial }}</div>
+      {% endif %}
       <div class="muted small">{{ loan.item_unit }} / {{ loan.item_shelf }}</div></td>
+    {% else %}
+      {% if loan.asset_tag or loan.serial %}
+      <td class="mono small">{{ loan.asset_tag or loan.serial }}</td>
+      {% else %}<td class="muted">—</td>{% endif %}
     {% endif %}
     <td><a href="/people/{{ loan.person_id }}">{{ loan.person_name }}</a>
       <div class="muted mono">{{ loan.person_email }}</div></td>

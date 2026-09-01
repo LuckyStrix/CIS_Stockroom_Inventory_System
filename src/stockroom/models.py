@@ -162,14 +162,33 @@ class Unit(_Row):
     state: str = "ok"
     state_note: str | None = None
     hold_id: int | None = None
+    # The open loan holding this unit, if any (from unit_status).
+    loan_id: int | None = None
+    borrower_name: str | None = None
+    loan_due_at: str | None = None
 
     @property
     def is_retired(self) -> bool:
         return self.retired_at is not None
 
     @property
+    def is_on_loan(self) -> bool:
+        return self.loan_id is not None
+
+    @property
     def is_available(self) -> bool:
+        """Sound and still owned. Says nothing about whether it is lent out.
+
+        This is the question the condition machinery asks -- can a hold be
+        opened on it -- and it deliberately keeps that meaning. For "can this
+        go out of the door right now", use is_lendable.
+        """
         return self.state == "ok" and not self.is_retired
+
+    @property
+    def is_lendable(self) -> bool:
+        """Sound, still owned, and not already in somebody's bag."""
+        return self.is_available and not self.is_on_loan
 
     @property
     def state_label(self) -> str:
@@ -269,16 +288,33 @@ class Loan(_Row):
     checked_out_by: str
     returned_by: str | None
     split_from_loan_id: int | None
+    # The individual unit that went out, for a tracked item. NULL otherwise,
+    # which is most loans.
+    unit_id: int | None = None
     item_name: str = ""
     item_barcode: str | None = None
     item_unit: str = ""
     item_shelf: str = ""
     person_name: str = ""
     person_email: str = ""
+    # The named unit's own identifiers, joined in by loan_detail.
+    asset_tag: str | None = None
+    serial: str | None = None
 
     @property
     def is_open(self) -> bool:
         return self.returned_at is None
+
+    @property
+    def names_a_unit(self) -> bool:
+        return self.unit_id is not None
+
+    @property
+    def what(self) -> str:
+        """What went out: a named object, or a count. Mirrors Hold.what."""
+        if self.asset_tag or self.serial:
+            return self.asset_tag or self.serial or ""
+        return f"{self.quantity} x {self.item_name}"
 
     def is_overdue(self, now: str) -> bool:
         """Open, has a due date, and that date has passed.

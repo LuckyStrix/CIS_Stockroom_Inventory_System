@@ -130,6 +130,46 @@ def test_local_redirect_targets_are_kept(candidate):
     assert deps.safe_path(candidate) == candidate
 
 
+def test_every_caller_supplied_next_goes_through_safe_path():
+    """A `next` form field handed straight to redirect() is an open redirect.
+
+    routes_loans was the one that did not wrap it, and a POST carrying
+    next=https://evil.example/ answered 303 to that host. This walks the
+    routes rather than testing one of them, so the next route to take a
+    `next` field cannot quietly skip the guard.
+    """
+    import inspect
+    import re
+
+    from stockroom.web import routes_auth, routes_loans, routes_requests
+
+    offenders = []
+    for module in (routes_auth, routes_loans, routes_requests):
+        source = inspect.getsource(module)
+        if 'next: str = Form(' not in source and 'next=' not in source:
+            continue
+        for call in re.findall(r"redirect\(\s*([A-Za-z_][A-Za-z_0-9]*)", source):
+            if call == "next":
+                offenders.append(module.__name__)
+    assert not offenders, (
+        "these modules pass a caller-supplied `next` to redirect() without "
+        f"safe_path: {sorted(set(offenders))}"
+    )
+
+
+def test_a_public_prefix_does_not_match_a_longer_word():
+    """"/public" as a *prefix* also matches /public-holidays and /publicfoo.
+
+    Nothing is on those paths today, but the auth gate is deny-by-default and
+    an accidental exemption is exactly what it exists to prevent.
+    """
+    assert deps.is_public_path("/public/")
+    assert deps.is_public_path("/public")
+    assert not deps.is_public_path("/publicfoo")
+    assert not deps.is_public_path("/public-holidays")
+    assert not deps.is_public_path("/publish")
+
+
 # ---------------------------------------------------------------------------
 # rate limiting
 # ---------------------------------------------------------------------------

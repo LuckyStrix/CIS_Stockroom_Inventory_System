@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import db, search
+from .models import Item
 from .service import (
     Actor,
     ConflictError,
@@ -38,7 +39,6 @@ from .service import (
     _clean,
     _optional,
     get_item,
-    get_unit,
     log_event,
 )
 
@@ -161,14 +161,65 @@ def scan_counts(conn: sqlite3.Connection, stocktake_id: int) -> dict[int, int]:
 
 
 def reconcile(conn: sqlite3.Connection, stocktake_id: int) -> Reconciliation:
-    """Compare what was scanned against what should have been on the shelf.
+    """What this stocktake found.
 
-    A pure read: it computes the comparison every time rather than storing a
-    result, so reopening an old stocktake shows what it found, not what the
-    shelves look like today.
+    For a session still open this is computed live, against the shelves as
+    they are right now -- which is what makes the progress view useful while
+    somebody is walking the room.
+
+    For a closed one it is read back from `stocktake_result`, exactly as it
+    was recorded when the count was finished. That distinction is the point:
+    a finished count is an observation of a particular day, and recomputing it
+    later compared old scans against new stock, so March's report grew April's
+    discrepancies every time something was lent out.
     """
     session = get_stocktake(conn, stocktake_id)
-    counted = scan_counts(conn, stocktake_id)
+    if not session.is_open:
+        frozen = _frozen_result(conn, session)
+        if frozen is not None:
+            return frozen
+        # A session closed before this table existed, or abandoned (which
+        # writes no result, because a half-count is not a finding). Fall
+        # through and compute, which is the old behaviour and still the best
+        # available answer.
+    return _reconcile_live(conn, session)
+
+
+def _frozen_result(
+    conn: sqlite3.Connection, session: Stocktake
+) -> Reconciliation | None:
+    """Rebuild a finished stocktake's findings from the recorded rows."""
+    rows = conn.execute(
+        "SELECT * FROM stocktake_result WHERE stocktake_id = ? "
+        "ORDER BY item_name COLLATE NOCASE",
+        (session.id,),
+    ).fetchall()
+    if not rows:
+        return None
+
+    lists: dict[str, list[Discrepancy]] = {
+        "matched": [], "short": [], "over": [], "unscanned": [],
+    }
+    for row in rows:
+        lists[row["kind"]].append(Discrepancy(
+            item_id=row["item_id"],
+            item_name=row["item_name"],
+            barcode=row["barcode"],
+            location=row["location"],
+            expected=row["expected"],
+            counted=row["counted"],
+        ))
+    return Reconciliation(
+        session, lists["matched"], lists["short"], lists["over"],
+        lists["unscanned"],
+    )
+
+
+def _reconcile_live(
+    conn: sqlite3.Connection, session: Stocktake
+) -> Reconciliation:
+    """Compare what was scanned against what is on the shelf right now."""
+    counted = scan_counts(conn, session.id)
 
     sql = "SELECT * FROM item_status WHERE archived_at IS NULL"
     params: list[Any] = []
@@ -182,8 +233,13 @@ def reconcile(conn: sqlite3.Connection, stocktake_id: int) -> Reconciliation:
     over: list[Discrepancy] = []
     unscanned: list[Discrepancy] = []
 
-    for row in conn.execute(sql, params):
-        item = get_item(conn, row["id"])
+    for row in conn.execute(sql, params).fetchall():
+        # Straight from the row in hand. This used to re-fetch each item by id,
+        # which is a second query per item across the whole scoped inventory --
+        # and finish_stocktake runs the whole comparison inside the write
+        # transaction, so on a full count that was thousands of needless
+        # queries holding the database's only write lock.
+        item = Item.from_row(row)
         found = counted.pop(item.id, None)
         entry = Discrepancy(
             item_id=item.id,
@@ -219,6 +275,34 @@ def reconcile(conn: sqlite3.Connection, stocktake_id: int) -> Reconciliation:
         ))
 
     return Reconciliation(session, matched, short, over, unscanned)
+
+
+def _freeze_result(
+    conn: sqlite3.Connection, stocktake_id: int, result: Reconciliation
+) -> None:
+    """Record what the count found, so the report stops moving.
+
+    Called only from finish_stocktake, inside the transaction that closes the
+    session. Nothing ever updates these rows: they are the observation, not a
+    cache of one.
+    """
+    for kind, entries in (
+        ("matched", result.matched),
+        ("short", result.short),
+        ("over", result.over),
+        ("unscanned", result.unscanned),
+    ):
+        for entry in entries:
+            conn.execute(
+                """
+                INSERT INTO stocktake_result
+                    (stocktake_id, item_id, item_name, barcode, location,
+                     expected, counted, kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (stocktake_id, entry.item_id, entry.item_name, entry.barcode,
+                 entry.location, entry.expected, entry.counted, kind),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -285,22 +369,20 @@ def record_scan(
             code = _clean(code)
             if not code:
                 raise ConflictError("Nothing was scanned.")
-            unit = None
-            found_unit = conn.execute(
-                "SELECT * FROM unit_status WHERE asset_tag = ?", (code,)
-            ).fetchone()
-            if found_unit is not None:
-                unit = get_unit(conn, found_unit["id"])
-                item_id, unit_id, quantity = unit.item_id, unit.id, 1
-            else:
-                item = search.resolve_scan(conn, code)
-                if item is None:
-                    raise NotFound(
-                        f"Nothing in the stockroom matches {code!r}. It may be "
-                        "something that was never entered -- add it, then scan "
-                        "it again."
-                    )
-                item_id = item.id
+            # search.resolve understands asset tags now. This used to do its
+            # own unit_status lookup here, which is why the counter and the
+            # CLI could not scan an asset tag while the stocktake could.
+            found = search.resolve(conn, code)
+            if found is None:
+                raise NotFound(
+                    f"Nothing in the stockroom matches {code!r}. It may be "
+                    "something that was never entered -- add it, then scan "
+                    "it again."
+                )
+            unit = found.unit
+            item_id = found.item.id
+            if unit is not None:
+                unit_id, quantity = unit.id, 1
 
         item = get_item(conn, item_id)
         conn.execute(
@@ -334,12 +416,15 @@ def finish_stocktake(
             raise ConflictError("That stocktake is already closed.")
 
         now = db.utcnow()
+        # Reconcile BEFORE the status changes, so this reads the live
+        # comparison rather than the frozen rows it is about to write.
+        result = _reconcile_live(conn, session)
         conn.execute(
             "UPDATE stocktake SET status = 'finished', finished_at = ?, "
             "finished_by = ? WHERE id = ?",
             (now, str(actor), stocktake_id),
         )
-        result = reconcile(conn, stocktake_id)
+        _freeze_result(conn, stocktake_id, result)
         summary = (
             f"Finished the stocktake of {session.scope_label}: "
             f"{result.counted_items} item(s) counted, "
@@ -360,7 +445,9 @@ def finish_stocktake(
                 "over": {"from": None, "to": [d.item_name for d in result.over]},
             },
         )
-        return reconcile(conn, stocktake_id)
+        # The same object that was just recorded, not a second full
+        # reconciliation of the whole inventory inside the write transaction.
+        return _frozen_result(conn, get_stocktake(conn, stocktake_id)) or result
 
 
 def abandon_stocktake(

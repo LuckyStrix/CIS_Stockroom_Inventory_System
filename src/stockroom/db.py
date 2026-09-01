@@ -32,7 +32,7 @@ from pathlib import Path
 
 from . import config
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA_SQL = Path(__file__).with_name("schema.sql")
 _SCHEMA_FTS_SQL = Path(__file__).with_name("schema_fts.sql")
@@ -70,9 +70,14 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Return this thread's connection, opening it on first use."""
     path = Path(db_path) if db_path is not None else config.DB_PATH
     key = str(path)
-    cache: dict[str, sqlite3.Connection] = getattr(_local, "conns", None) or {}
-    if not hasattr(_local, "conns"):
-        _local.conns = cache
+    # `getattr(..., None) or {}` would be wrong here: an *empty* cache is
+    # falsy, so it would build a fresh dict that nothing ever stores back, and
+    # every later call would open an untracked connection that close_all()
+    # cannot close. That is the state every test is left in, because
+    # conftest.py calls close_all() between them. Test for None, not falsiness.
+    cache: dict[str, sqlite3.Connection] | None = getattr(_local, "conns", None)
+    if cache is None:
+        cache = _local.conns = {}
 
     conn = cache.get(key)
     if conn is None:
@@ -178,6 +183,11 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("item", "tracked", "INTEGER NOT NULL DEFAULT 0"),
     # v3: duplicate-person merges (see service.merge_people)
     ("person", "merged_into_id", "INTEGER REFERENCES person(id)"),
+    # v4: which individual unit went out on this loan (see service.checkout).
+    # The forward reference to `unit` is fine even on a v2 database, where
+    # that table does not exist yet when this runs: SQLite resolves foreign
+    # keys when a row is written, not when the column is declared.
+    ("loan", "unit_id", "INTEGER REFERENCES unit(id)"),
 )
 
 
@@ -278,6 +288,14 @@ def _migrate(conn: sqlite3.Connection, *, from_version: int) -> None:
         from .service import rebuild_audit_chain
 
         rebuild_audit_chain(conn)
+
+    # 3 -> 4: loans can name an individual unit, and a finished stocktake
+    # records what it found. Both are handled elsewhere -- the column by
+    # _ensure_columns, the table and index by schema.sql -- and there is
+    # nothing to backfill: which camera body went out on a loan closed last
+    # year is not recoverable from anything, so those rows honestly stay NULL.
+    # The version still moves, so an older binary refuses this database
+    # instead of quietly writing loans with no unit on them.
 
 
 def _backfill_fts(conn: sqlite3.Connection) -> None:
