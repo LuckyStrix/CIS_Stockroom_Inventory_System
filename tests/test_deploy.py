@@ -19,6 +19,7 @@ disagree.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -205,3 +206,114 @@ def test_the_env_example_covers_the_settings_worth_setting():
         "STOCKROOM_BACKUP_COPY_DIR", "STOCKROOM_BACKUP_REMOTE",
     ):
         assert expected in documented, f"{expected} is not in the example file"
+
+
+# ---------------------------------------------------------------------------
+# the installer's rsync
+#
+# A second real failure. setup-pi.sh copied the source with
+#
+#     rsync -a --delete --exclude 'publish' ...
+#
+# and an rsync pattern with no leading slash matches at EVERY level of the
+# tree, not just the top. The intent was to skip the generated ./publish
+# output directory; the effect was to also delete src/stockroom/publish/, the
+# Python subpackage that renders it. The install then died with
+#
+#     ModuleNotFoundError: No module named 'stockroom.publish'
+#
+# The clean-clone check that ran before release did not catch it, because it
+# cloned with git and installed directly -- it never went through the rsync.
+# This does.
+# ---------------------------------------------------------------------------
+
+
+def _rsync_excludes() -> list[str]:
+    """The exact --exclude arguments setup-pi.sh passes."""
+    body = (_DEPLOY / "setup-pi.sh").read_text()
+    block = re.search(r"^rsync -a --delete.*?\n\s*\"\$REPO_DIR/\"", body,
+                      re.M | re.S)
+    assert block, "could not find the rsync invocation in setup-pi.sh"
+    return re.findall(r"--exclude '([^']+)'", block.group(0))
+
+
+def _source_packages() -> set[str]:
+    """Every importable package under src/, as dotted names."""
+    src = _ROOT / "src"
+    return {
+        str(path.parent.relative_to(src)).replace("/", ".")
+        for path in src.rglob("__init__.py")
+        if "__pycache__" not in path.parts
+    }
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync not installed")
+def test_the_installer_rsync_keeps_every_python_package(tmp_path):
+    """Run the real exclude list and check nothing importable is dropped."""
+    destination = tmp_path / "opt"
+    destination.mkdir()
+    excludes = []
+    for pattern in _rsync_excludes():
+        excludes += ["--exclude", pattern]
+
+    result = subprocess.run(
+        ["rsync", "-a", "--delete", *excludes, f"{_ROOT}/", f"{destination}/"],
+        capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+
+    expected = _source_packages()
+    assert "stockroom.publish" in expected, "test is not looking at the right tree"
+
+    survived = {
+        str(path.parent.relative_to(destination / "src")).replace("/", ".")
+        for path in (destination / "src").rglob("__init__.py")
+        if "__pycache__" not in path.parts
+    }
+    missing = expected - survived
+    assert not missing, (
+        f"setup-pi.sh's rsync deletes these Python packages: {sorted(missing)}. "
+        "An --exclude pattern without a leading slash matches at every level "
+        "of the tree, not just the transfer root."
+    )
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync not installed")
+def test_the_installer_rsync_still_skips_the_generated_directories(tmp_path):
+    """The excludes must keep doing their actual job.
+
+    Anchoring them must not turn into deleting them: a database or a rendered
+    public page copied into /opt would be stale from the moment it landed.
+    """
+    destination = tmp_path / "opt"
+    destination.mkdir()
+    (_ROOT / "data").mkdir(exist_ok=True)
+    (_ROOT / "publish").mkdir(exist_ok=True)
+
+    excludes = []
+    for pattern in _rsync_excludes():
+        excludes += ["--exclude", pattern]
+    subprocess.run(
+        ["rsync", "-a", "--delete", *excludes, f"{_ROOT}/", f"{destination}/"],
+        capture_output=True, text=True, timeout=180, check=True,
+    )
+
+    for unwanted in ("data", "publish", ".git", ".venv", ".pytest_cache"):
+        assert not (destination / unwanted).exists(), (
+            f"{unwanted}/ was copied into the install directory"
+        )
+    assert not list(destination.rglob("__pycache__")), "__pycache__ was copied"
+
+
+def test_top_level_excludes_are_anchored():
+    """The rule, stated directly, so the reason survives a future edit."""
+    unanchored = [
+        pattern for pattern in _rsync_excludes()
+        # __pycache__ is deliberately unanchored: it should go at every level.
+        if pattern != "__pycache__" and not pattern.startswith("/")
+    ]
+    assert not unanchored, (
+        f"these rsync excludes match at every level of the tree: {unanchored}. "
+        "Anchor them with a leading slash unless they are genuinely meant to "
+        "match everywhere."
+    )

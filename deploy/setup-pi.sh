@@ -46,9 +46,22 @@ fi
 say "Installing the application to ${APP_DIR}"
 mkdir -p "$APP_DIR"
 # Copy the source, but never the local database, venv or generated page.
+#
+# THE LEADING SLASHES ARE LOAD-BEARING. An rsync pattern without one matches
+# at every level of the tree, not just the top -- so a bare `--exclude publish`
+# also deletes src/stockroom/publish/, the Python subpackage that renders the
+# public page, and the install then dies with:
+#
+#     ModuleNotFoundError: No module named 'stockroom.publish'
+#
+# Anchored patterns match only the transfer root, which is what was meant:
+# the generated ./publish output directory and the local ./data database.
+# __pycache__ stays unanchored on purpose -- that one really should go at
+# every level. Covered by tests/test_deploy.py::test_the_installer_rsync_
+# keeps_every_python_package.
 rsync -a --delete \
-    --exclude '.venv' --exclude '__pycache__' --exclude '.git' \
-    --exclude 'data' --exclude 'publish' --exclude '.pytest_cache' \
+    --exclude '/.venv' --exclude '__pycache__' --exclude '/.git' \
+    --exclude '/data' --exclude '/publish' --exclude '/.pytest_cache' \
     "$REPO_DIR/" "$APP_DIR/"
 
 say "Building the virtual environment"
