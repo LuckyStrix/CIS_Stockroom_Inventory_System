@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import pytest
 
-from stockroom import config, db, service
+from stockroom import config, db, security, service
 from stockroom.service import Actor
 
 
 @pytest.fixture(autouse=True)
 def temp_env(tmp_path, monkeypatch):
     """Point the whole application at a throwaway directory."""
+    # Process-global and deliberately not in the database, so unlike every
+    # other bit of state here it survives the temp directory. A test that
+    # tripped a lockout would otherwise silently suppress the audit event a
+    # later test asserts on.
+    security.lockout_log_throttle.reset()
     monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "data" / "stockroom.db")
     monkeypatch.setattr(config, "BACKUP_DIR", tmp_path / "data" / "backups")

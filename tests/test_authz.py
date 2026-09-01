@@ -71,8 +71,32 @@ def sign_in(app, email: str, password: str) -> TestClient:
 
 
 @pytest.fixture
+def staff(conn, admin):
+    """A staff account that is NOT an administrator.
+
+    `staff_client` below signs in the admin, because staff-or-better is what
+    most routes ask for. That makes it useless for testing the boundary
+    *between* the two roles, which is how a staff account kept the ability to
+    switch off every administrator.
+    """
+    account = accounts.register(
+        conn, first_name="Sam", last_name="Torres", email="st5678@rit.edu",
+        password=OTHER, role="staff", status="active", actor=SETUP,
+    )
+    return account
+
+
+@pytest.fixture
 def staff_client(app, admin):
     client = sign_in(app, "carter@rit.edu", STRONG)
+    yield client
+    client.__exit__(None, None, None)
+
+
+@pytest.fixture
+def staff_only_client(app, staff):
+    """Signed in as staff, with no admin rights."""
+    client = sign_in(app, "st5678@rit.edu", OTHER)
     yield client
     client.__exit__(None, None, None)
 
@@ -230,6 +254,60 @@ def test_only_an_admin_can_change_roles(staff_client, requester_client, conn, re
         follow_redirects=False,
     ).status_code == 303
     assert accounts.get_account(conn, requester.id).role == "staff"
+
+
+def test_staff_cannot_switch_off_an_administrator(
+    staff_only_client, conn, admin, requester
+):
+    """The route that used to be the way around require_admin on /role.
+
+    A staff account could not demote an administrator, but could disable one
+    -- and then the next, until an installation had no administrator at all
+    and nothing short of shell access to the Pi could grant the role back.
+    """
+    token = csrf(staff_only_client, "/accounts")
+
+    assert staff_only_client.post(
+        f"/accounts/{admin.id}/status", data={"status": "disabled", "_csrf": token},
+        follow_redirects=False,
+    ).status_code == 403
+    assert accounts.get_account(conn, admin.id).status == "active"
+
+    # Declining a signup is routine staff work and stays with staff.
+    assert staff_only_client.post(
+        f"/accounts/{requester.id}/status",
+        data={"status": "disabled", "_csrf": token}, follow_redirects=False,
+    ).status_code == 303
+    assert accounts.get_account(conn, requester.id).status == "disabled"
+
+
+def test_staff_cannot_switch_off_another_staff_account(
+    staff_only_client, conn, admin
+):
+    other = accounts.register(
+        conn, first_name="Robin", last_name="Fell", email="rf4321@rit.edu",
+        password=OTHER, role="staff", status="active", actor=SETUP,
+    )
+    token = csrf(staff_only_client, "/accounts")
+    assert staff_only_client.post(
+        f"/accounts/{other.id}/status", data={"status": "disabled", "_csrf": token},
+        follow_redirects=False,
+    ).status_code == 403
+    assert accounts.get_account(conn, other.id).status == "active"
+
+
+def test_an_admin_can_still_switch_off_another_admin(staff_client, conn, admin):
+    """The guard is about privilege, not about admins being untouchable."""
+    other = accounts.register(
+        conn, first_name="Dana", last_name="Iyer", email="di8765@rit.edu",
+        password=OTHER, role="admin", status="active", actor=SETUP,
+    )
+    token = csrf(staff_client, "/accounts")
+    assert staff_client.post(
+        f"/accounts/{other.id}/status", data={"status": "disabled", "_csrf": token},
+        follow_redirects=False,
+    ).status_code == 303
+    assert accounts.get_account(conn, other.id).status == "disabled"
 
 
 def test_a_requester_cannot_read_someone_elses_request(

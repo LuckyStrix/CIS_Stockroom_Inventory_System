@@ -379,3 +379,19 @@ class RateLimiter:
             self._hits.clear()
         else:
             self._hits.pop(key, None)
+
+
+# How often a *blocked* login may write an audit event, per address.
+#
+# The lockout path is cheaper than a real login -- it never reaches scrypt --
+# and it deliberately records nothing in auth_attempt, so nothing throttled it
+# either. That made it a better denial of service than the guessing it defends
+# against: every refused attempt appended a hash-chained `event` row and took
+# the database's single BEGIN IMMEDIATE write lock. Measured at ~3,400 rows a
+# second, which fills an SD card and contends with the checkout counter.
+#
+# One event per address per lockout window says everything the log needs to:
+# that this account was under attack, and when. Kept in memory rather than the
+# database because losing it on restart costs one extra row -- a far better
+# failure than adding a query to a path whose whole purpose is to be cheap.
+lockout_log_throttle = RateLimiter(limit=1, per_seconds=LOCKOUT_WINDOW_MINUTES * 60)

@@ -42,7 +42,24 @@ def approve(request: Request, account_id: int):
 @router.post("/accounts/{account_id}/status")
 def set_status(request: Request, account_id: int, status: str = Form(...),
                reason: str = Form("")):
+    """Decline, disable or re-enable an account.
+
+    The permission depends on who is being switched off, not only on who is
+    asking. Declining a spam signup is routine staff work and stays with
+    staff; reaching for a colleague's account -- or an administrator's -- is
+    an admin action.
+
+    Without that split this route was the way around require_admin on
+    /role: a staff member could not demote an administrator, but could
+    disable every one of them in turn and leave an installation that only
+    the CLI on the Pi could rescue.
+    """
+    # Staff first, so a requester is refused without the lookup below telling
+    # them whether that account id exists. Then escalate on what was found.
     staff = require_staff(request)
+    subject = accounts.get_account(get_conn(), account_id)
+    if subject.is_staff:
+        staff = require_admin(request)
     try:
         account = accounts.set_status(
             get_conn(), actor=staff.as_actor(), account_id=account_id,

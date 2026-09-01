@@ -328,6 +328,22 @@ def _link_person(conn: sqlite3.Connection, *, actor: Actor, account: Account) ->
         )
 
 
+def _other_active_admins(conn: sqlite3.Connection, account_id: int) -> int:
+    """How many active administrators there would be without this account.
+
+    Both set_role and set_status consult this: demoting the last admin and
+    switching the last admin off are two routes to an installation nobody can
+    administer, and only the first one used to be guarded.
+    """
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM account "
+            "WHERE role = 'admin' AND status = 'active' AND id <> ?",
+            (account_id,),
+        ).fetchone()["n"]
+    )
+
+
 def set_status(
     conn: sqlite3.Connection, *, actor: Actor, account_id: int, status: str,
     reason: str = "",
@@ -336,6 +352,11 @@ def set_status(
 
     Disabling revokes every live session for that account immediately -- an
     account that is switched off must stop working now, not in eight hours.
+
+    Who is *allowed* to call this is decided at the route layer, which knows
+    the caller's role; an Actor is a name and an email and has none. What is
+    enforced here is the invariant, exactly as in set_role: the installation
+    may not be left with no administrator.
     """
     if status not in STATUSES:
         raise ValidationError(f"Unknown status {status!r}.")
@@ -344,6 +365,17 @@ def set_status(
         account = get_account(conn, account_id)
         if account.status == status:
             return account
+
+        # The same guard set_role has, for the other way of reaching the same
+        # place. Demoting the last admin was refused; switching them off was
+        # not, and it leaves an installation that cannot grant the role back
+        # to anyone without shell access to the Pi.
+        if account.role == "admin" and status != "active":
+            if _other_active_admins(conn, account_id) == 0:
+                raise ConflictError(
+                    "This is the only active administrator. Promote someone "
+                    "else before switching this account off."
+                )
         conn.execute(
             "UPDATE account SET status = ?, updated_at = ? WHERE id = ?",
             (status, db.utcnow(), account_id),
@@ -386,12 +418,7 @@ def set_role(
         # Refuse to remove the last administrator: an installation with no
         # admin cannot grant anyone the role back without CLI access.
         if account.role == "admin" and role != "admin":
-            remaining = conn.execute(
-                "SELECT COUNT(*) AS n FROM account "
-                "WHERE role = 'admin' AND status = 'active' AND id <> ?",
-                (account_id,),
-            ).fetchone()["n"]
-            if remaining == 0:
+            if _other_active_admins(conn, account_id) == 0:
                 raise ConflictError(
                     "This is the only active administrator. Promote someone "
                     "else before changing this account."
@@ -500,16 +527,25 @@ def login(
         # never checked, so there is nothing to count -- and counting it fed
         # the very window that caused the lockout, which made the lockout
         # self-sustaining: five guesses every fifteen minutes kept any staff
-        # account locked out permanently, with no way to clear it. The event
-        # below still records that someone tried.
-        with db.transaction(conn):
-            log_event(
-                conn,
-                actor=Actor(name=email or "unknown", email=email),
-                action="auth.lockout",
-                entity_type="account",
-                summary=f"Login blocked for {email or 'unknown'}: {lockout.reason}",
-            )
+        # account locked out permanently, with no way to clear it.
+        #
+        # The event is written once per address per window, not once per
+        # attempt. Because nothing throttled this path and it never reaches
+        # scrypt, it was the cheapest way to write to the database in the
+        # whole application: an attacker who tripped a lockout could then
+        # append thousands of rows a second to the audit log, each one taking
+        # the single write lock the counter needs. The log wants to know that
+        # this account was attacked and when, which one row says as well as
+        # ten thousand.
+        if security.lockout_log_throttle.allow(f"lockout:{email or 'unknown'}"):
+            with db.transaction(conn):
+                log_event(
+                    conn,
+                    actor=Actor(name=email or "unknown", email=email),
+                    action="auth.lockout",
+                    entity_type="account",
+                    summary=f"Login blocked for {email or 'unknown'}: {lockout.reason}",
+                )
         raise AuthError(
             "Too many failed attempts. Wait 15 minutes and try again."
         )

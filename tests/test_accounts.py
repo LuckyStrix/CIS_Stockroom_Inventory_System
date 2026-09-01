@@ -210,6 +210,49 @@ def test_a_blocked_attempt_does_not_extend_the_lockout(conn, active):
         "the blocked attempt must still be audited"
 
 
+def test_a_locked_out_address_cannot_flood_the_audit_log(conn, active):
+    """The lockout must not be a cheaper way to write than a real login.
+
+    A blocked attempt never reaches scrypt and records no auth_attempt row, so
+    nothing throttled it: every refusal appended a hash-chained event and took
+    the database's only write lock, at thousands per second. That fills an SD
+    card and contends with the counter, and it buries the inventory history
+    the log exists to keep.
+
+    One event per address per window says everything worth saying -- that this
+    account was attacked, and when.
+    """
+    for _ in range(security.MAX_FAILURES_PER_EMAIL):
+        with pytest.raises(accounts.AuthError):
+            accounts.login(conn, email="an1234@rit.edu", password="nope nope nope",
+                           ip="10.0.0.1")
+
+    def lockout_events():
+        return len(service.list_events(conn, action="auth.lockout", limit=1000))
+
+    for _ in range(50):
+        with pytest.raises(accounts.AuthError, match="Too many"):
+            accounts.login(conn, email="an1234@rit.edu", password="nope nope nope",
+                           ip="10.0.0.1")
+
+    assert lockout_events() == 1, \
+        "a blocked attempt must not append an event every time"
+
+
+def test_a_second_address_still_gets_its_own_lockout_event(conn, active, admin):
+    """Throttling is per address, so one victim cannot mask another."""
+    for email in ("an1234@rit.edu", "carter@rit.edu"):
+        for _ in range(security.MAX_FAILURES_PER_EMAIL + 2):
+            with pytest.raises(accounts.AuthError):
+                accounts.login(conn, email=email, password="nope nope nope",
+                               ip="10.0.0.2")
+
+    blocked = service.list_events(conn, action="auth.lockout", limit=1000)
+    assert len(blocked) == 2
+    summaries = " ".join(e.summary for e in blocked)
+    assert "an1234@rit.edu" in summaries and "carter@rit.edu" in summaries
+
+
 def test_login_upgrades_a_weakly_hashed_password(conn, admin):
     """The rehash path: the only moment the plaintext is available."""
     weak = security.hash_password(STRONG, n=2**14, r=8, p=1)
@@ -365,6 +408,27 @@ def test_the_last_administrator_cannot_be_demoted(conn, admin):
     with pytest.raises(ConflictError, match="only active administrator"):
         accounts.set_role(conn, actor=admin.as_actor(), account_id=admin.id,
                           role="requester")
+
+
+def test_the_last_administrator_cannot_be_switched_off(conn, admin):
+    """The other way to reach an installation with no administrator.
+
+    set_role guarded demotion from the start; set_status did not guard
+    disabling, so the same end state was one POST away.
+    """
+    with pytest.raises(ConflictError, match="only active administrator"):
+        accounts.set_status(conn, actor=admin.as_actor(), account_id=admin.id,
+                            status="disabled")
+    assert accounts.get_account(conn, admin.id).status == "active"
+
+
+def test_an_administrator_can_be_switched_off_once_another_exists(
+    conn, admin, active
+):
+    accounts.set_role(conn, actor=admin.as_actor(), account_id=active.id, role="admin")
+    disabled = accounts.set_status(conn, actor=admin.as_actor(),
+                                   account_id=admin.id, status="disabled")
+    assert disabled.status == "disabled"
 
 
 def test_demotion_is_allowed_once_another_admin_exists(conn, admin, active):
