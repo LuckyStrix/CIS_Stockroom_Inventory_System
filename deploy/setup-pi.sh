@@ -285,7 +285,9 @@ cat <<EOF
          (add --commit once the dry run looks right)
     2. Print barcode labels from  https://${HOSTNAME_LOCAL}/labels
     3. LOCK THE PI DOWN -- this script has not done it:
-         sudo ./deploy/harden-pi.sh --subnet <your campus CIDR>
+         sudo ./deploy/harden-pi.sh
+         (allows 22/80/443 from the campus network, eduroam included;
+          --allow-from <cidr> to set the ranges yourself)
 
   Commands    stockroom status | doctor | loans --overdue
               (runs as the ${SERVICE_USER} account; --actor names you in the log)

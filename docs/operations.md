@@ -411,7 +411,7 @@ is the one guarantee this system exists to provide. Use the UI or the CLI.
 
 ```bash
 # From ANOTHER machine: only 22, 80 and 443 should answer, and only from
-# inside the allowed subnet.
+# inside the allowed ranges (harden-pi.sh --allow-from; campus-wide by default).
 nmap -Pn cis-stockroom.local
 
 # On the Pi: uvicorn must be on 127.0.0.1, never 0.0.0.0.

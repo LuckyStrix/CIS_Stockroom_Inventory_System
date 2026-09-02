@@ -2,13 +2,36 @@
 #
 # Lock down the Raspberry Pi that runs the stockroom.
 #
-#     sudo ./deploy/harden-pi.sh --subnet 129.21.0.0/16
+#     sudo ./deploy/harden-pi.sh                     # campus defaults, below
+#     sudo ./deploy/harden-pi.sh --allow-from 129.21.0.0/16,10.0.0.0/8
+#     sudo ./deploy/harden-pi.sh --ssh-from 129.21.0.0/16   # web wider than SSH
+#     sudo ./deploy/harden-pi.sh --any               # anything that can route here
 #
-# What it does, and why:
+# Who can reach it:
 #
-#   * ufw default-deny inbound, allowing only SSH and HTTPS, and only from the
-#     subnet you name. This is the control that makes "no inbound exposure from
-#     the internet" true rather than aspirational.
+#   A single subnet is the wrong unit. A phone or laptop on eduroam is handed
+#   an address from whatever wireless VLAN it lands on -- different building,
+#   different range, and it changes as somebody walks across campus. Pinning
+#   the firewall to one CIDR, or to the Pi's own subnet, locks out exactly the
+#   people the stockroom is for. eduroam is campus-wide, so the allow list is
+#   the campus network as a whole:
+#
+#       129.21.0.0/16    RIT's public allocation, wired and wireless
+#       10.0.0.0/8      \
+#       172.16.0.0/12    | private ranges -- eduroam clients arriving NAT'd
+#       192.168.0.0/16  /
+#
+#   The private ranges are not a hole to the internet: RFC1918 addresses are
+#   not routable across it, so those rules can only ever match a packet that
+#   reached this machine from the campus network. Replace the list with
+#   --allow-from if your site differs, and use --ssh-from to keep port 22
+#   narrower than 80/443.
+#
+# What else it does, and why:
+#
+#   * ufw default-deny inbound, allowing only SSH, HTTP and HTTPS, and only
+#     from the ranges above. This is the control that makes "no inbound
+#     exposure from the internet" true rather than aspirational.
 #   * SSH keys only. Password authentication on a machine reachable from a
 #     university network is a guessing game you eventually lose.
 #   * unattended-upgrades for security patches, because the realistic way this
@@ -22,22 +45,70 @@
 
 set -euo pipefail
 
-SUBNET=""
+# The campus network as seen from the stockroom LAN -- see the note above for
+# why this is a list of ranges and not one subnet.
+DEFAULT_ALLOW=(129.21.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16)
+
+ALLOW=()
+SSH_ALLOW=()
+ALLOW_ANY=0
 SKIP_SSH=0
+
+# Accept ranges one per flag or comma-separated, so both
+# `--allow-from a --allow-from b` and `--allow-from a,b` do the same thing.
+add_ranges() {
+    local -n _target="$1"; shift
+    local raw item _items
+    for raw in "$@"; do
+        IFS=', ' read -r -a _items <<< "$raw"
+        for item in "${_items[@]}"; do
+            [[ -n "$item" ]] && _target+=("$item")
+        done
+    done
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --subnet) SUBNET="$2"; shift 2 ;;
-        --skip-ssh) SKIP_SSH=1; shift ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        --allow-from) add_ranges ALLOW "$2"; shift 2 ;;
+        --ssh-from)   add_ranges SSH_ALLOW "$2"; shift 2 ;;
+        # The original spelling, still in older printed instructions and in
+        # anyone's shell history. It means the same thing and may be repeated.
+        --subnet)     add_ranges ALLOW "$2"; shift 2 ;;
+        --any)        ALLOW_ANY=1; shift ;;
+        --skip-ssh)   SKIP_SSH=1; shift ;;
+        # Print the header block -- it is the documentation, so it cannot go
+        # stale the way a line range into this file would.
+        -h|--help)    sed -n '2,/^$/p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
 if [[ $EUID -ne 0 ]]; then
-    echo "Run with sudo: sudo $0 --subnet <cidr>" >&2
+    echo "Run with sudo: sudo $0 [--allow-from <cidr>]" >&2
     exit 1
 fi
+
+USING_DEFAULTS=0
+if [[ ${#ALLOW[@]} -eq 0 ]]; then
+    ALLOW=("${DEFAULT_ALLOW[@]}")
+    USING_DEFAULTS=1
+fi
+# SSH follows the web ports unless it was given a narrower list of its own.
+if [[ ${#SSH_ALLOW[@]} -eq 0 ]]; then
+    SSH_ALLOW=("${ALLOW[@]}")
+fi
+
+# Catch a typo here rather than halfway through rewriting the rules, where
+# `set -e` would leave the firewall with the allow rules only partly applied.
+for _range in "${ALLOW[@]}" "${SSH_ALLOW[@]}"; do
+    if [[ "$_range" == *:* ]]; then
+        [[ "$_range" =~ ^[0-9A-Fa-f:]+(/[0-9]{1,3})?$ ]] && continue
+    else
+        [[ "$_range" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] && continue
+    fi
+    echo "Not an address or CIDR range: $_range" >&2
+    exit 1
+done
 
 say() { printf '\n\033[1;33m==> %s\033[0m\n' "$1"; }
 warn() { printf '\033[1;31m!!  %s\033[0m\n' "$1"; }
@@ -54,18 +125,35 @@ ufw --force reset >/dev/null
 ufw default deny incoming
 ufw default allow outgoing
 
-if [[ -n "$SUBNET" ]]; then
-    ufw allow from "$SUBNET" to any port 22  proto tcp comment 'SSH from campus'
-    ufw allow from "$SUBNET" to any port 80  proto tcp comment 'HTTP redirect + public page'
-    ufw allow from "$SUBNET" to any port 443 proto tcp comment 'stockroom HTTPS'
-    echo "Inbound allowed from $SUBNET only."
-else
-    warn "No --subnet given: allowing 22/80/443 from any address that can route here."
-    warn "Re-run with --subnet <cidr> to restrict this. It is the single most"
-    warn "valuable line of defence on a shared network."
+if [[ $ALLOW_ANY -eq 1 ]]; then
+    warn "--any given: allowing 22/80/443 from any address that can route here."
+    warn "Drop the flag to restrict this to the campus ranges. It is the single"
+    warn "most valuable line of defence on a shared network."
     ufw allow 22/tcp
     ufw allow 80/tcp
     ufw allow 443/tcp
+else
+    for _range in "${SSH_ALLOW[@]}"; do
+        ufw allow from "$_range" to any port 22  proto tcp comment 'SSH from campus'
+    done
+    for _range in "${ALLOW[@]}"; do
+        ufw allow from "$_range" to any port 80  proto tcp comment 'HTTP redirect + public page'
+        ufw allow from "$_range" to any port 443 proto tcp comment 'stockroom HTTPS'
+    done
+    echo "HTTP/HTTPS allowed from: ${ALLOW[*]}"
+    echo "SSH allowed from:        ${SSH_ALLOW[*]}"
+    [[ $USING_DEFAULTS -eq 1 ]] && \
+        echo "(campus defaults -- pass --allow-from <cidr> to replace them)"
+
+    # A device that reaches the Pi over IPv6 arrives from an address no v4 rule
+    # can match and is dropped by the default policy, with nothing on the
+    # client to say why. Only worth mentioning if v6 is actually in play here.
+    if ! printf '%s\n' "${ALLOW[@]}" | grep -q ':' &&
+       ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+        warn "This Pi has a global IPv6 address, but the allow list is IPv4 only:"
+        warn "anything that connects over IPv6 will be dropped. Add the campus"
+        warn "IPv6 prefix with --allow-from, or turn IPv6 off on this machine."
+    fi
 fi
 
 ufw --force enable
@@ -191,7 +279,8 @@ say "Done"
 # ---------------------------------------------------------------------------
 cat <<EOF
 
-  Firewall     inbound denied by default${SUBNET:+, allowed only from $SUBNET}
+  Firewall     inbound denied by default
+  Allowed      22/80/443 from $( [[ $ALLOW_ANY -eq 1 ]] && echo "anywhere that can route here" || echo "${ALLOW[*]}" )
   SSH          $( [[ $SKIP_SSH -eq 1 ]] && echo "unchanged" || echo "key-only (if a key was present)" )
   Updates      security patches applied automatically, reboots left to you
   fail2ban     active on sshd
@@ -200,7 +289,7 @@ cat <<EOF
 
       nmap -Pn $(hostname -I | awk '{print $1}')
 
-  Expect 22, 80 and 443 and nothing else. From outside the allowed subnet,
+  Expect 22, 80 and 443 and nothing else. From outside the allowed ranges,
   expect nothing at all.
 
   Remaining risks that no script can fix are listed in docs/security.md.

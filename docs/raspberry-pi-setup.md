@@ -58,6 +58,12 @@ The Pi needs to be findable. Either is fine:
 `avahi-daemon` (installed by the setup script) makes `cis-stockroom.local`
 work on the LAN regardless.
 
+**But mDNS does not cross a VLAN.** A phone on eduroam is on a different
+wireless segment from the stockroom's wired one, so `cis-stockroom.local` will
+not resolve for it however well it works from the bench next to the Pi. Those
+devices need either the Pi's IP address or a real DNS name from ITS — which is
+the reason to pin the address here rather than let DHCP move it.
+
 ## 4. Install the application
 
 Copy this repository to the Pi and run the installer:
@@ -107,9 +113,22 @@ stockroom user create \
     --first-name Your --last-name Name --email you@rit.edu --admin
 
 # Firewall, key-only SSH, automatic security updates, fail2ban.
-# Pass YOUR campus subnet -- this is the single most valuable line of defence.
-sudo ./deploy/harden-pi.sh --subnet 129.21.0.0/16
+# With no arguments it allows 22/80/443 from the campus network -- RIT's
+# 129.21.0.0/16 plus the private ranges eduroam clients are NAT'd behind.
+sudo ./deploy/harden-pi.sh
 ```
+
+Deliberately not a single subnet: eduroam hands a device an address from
+whichever wireless VLAN it happens to be on, so a one-CIDR rule locks out the
+phones and laptops this is for. Elsewhere, or to keep SSH tighter than the
+web ports:
+
+```bash
+sudo ./deploy/harden-pi.sh --allow-from 10.0.0.0/8,172.16.0.0/12 \
+                           --ssh-from 129.21.5.0/24
+```
+
+`./deploy/harden-pi.sh --help` lists the rest.
 
 `harden-pi.sh` will refuse to disable password SSH unless you already have a
 key installed, rather than locking you out of your own Pi. Run

@@ -28,8 +28,17 @@ no UPnP. Nothing outside RIT's network can open a connection to this machine.
 
 **What is necessarily true:** the Pi accepts connections *from the RIT network*.
 Something has to listen, or nobody can fill in a form. `ufw` denies inbound by
-default and permits 22/80/443 only from the subnet given to
-`deploy/harden-pi.sh --subnet`.
+default and permits 22/80/443 only from the ranges `deploy/harden-pi.sh` was
+given — by default RIT's `129.21.0.0/16` plus `10.0.0.0/8`, `172.16.0.0/12`
+and `192.168.0.0/16`.
+
+The unit is the campus network, not a subnet, because eduroam is campus-wide:
+a device is handed an address from whichever wireless VLAN it lands on, so
+allowing one CIDR bars most of the people who need the stockroom. The private
+ranges widen who on campus can connect without widening what the internet can
+reach — RFC1918 addresses are not routable across it, so those rules can only
+match traffic that arrived from this network. Narrow it with `--allow-from`,
+and keep SSH tighter than 80/443 with `--ssh-from`, if your site allows it.
 
 So the accurate claim is **no new attack surface facing the internet**, plus a
 firewalled, authenticated, TLS-only service facing the campus network.
@@ -48,7 +57,14 @@ and `X-Forwarded-For`.
 | **Sessions** | Server-side and revocable. A 256-bit random token in the cookie; only its SHA-256 is stored. |
 | **Cookie** | `__Host-` prefixed under TLS: `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, no `Domain`. |
 | **Timeouts** | 8 hours idle (slides), 7 days absolute (never extends). |
-| **Lockout** | 5 failures per address in 15 minutes; a separate per-IP ceiling stops spraying. Stored in the database, so restarting the service does **not** reset it. |
+| **Lockout** | 5 failures per address in 15 minutes; a separate per-IP ceiling (20 in 15 minutes) stops spraying. Stored in the database, so restarting the service does **not** reset it. |
+
+One caveat on that per-IP ceiling: wireless clients that reach the Pi
+through NAT share a source address, so they share the allowance too — an
+unlucky run of typos on eduroam could in principle spend it for everyone
+behind the same gateway. The per-account limit is the one doing the real
+work; raise `security.MAX_FAILURES_PER_IP` if this is ever seen in
+`stockroom history --action auth.login_failed`.
 
 There is deliberately **no way to create an administrator over the network**.
 The first one is made with `stockroom user create --admin` by someone who
