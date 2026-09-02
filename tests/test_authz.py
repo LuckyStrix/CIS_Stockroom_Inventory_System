@@ -159,7 +159,7 @@ def test_the_route_walk_actually_finds_the_routes(app):
     # A route from each router, so a partial traversal is caught too.
     for path in ("/items/new", "/loans", "/counter", "/kits", "/stocktake",
                  "/accounts", "/people", "/history", "/reports", "/requests",
-                 "/login", "/publish"):
+                 "/login", "/publish", "/sso/login"):
         assert path in paths, f"{path} is missing from the walked route table"
 
 
@@ -192,7 +192,19 @@ def test_every_route_is_either_public_or_requires_a_login(app, temp_env):
 
 
 def test_every_post_route_rejects_a_missing_csrf_token(app, requester_client):
-    """A signed-in session is not enough; the token must be present."""
+    """A signed-in session is not enough; the token must be present.
+
+    There is no exemption list here, deliberately, even though one POST route
+    -- /sso/acs -- does not check a CSRF token. It cannot: it is a cross-site
+    form POST from RIT's identity provider, which has never seen our token.
+    It reaches the same 403 by a different and stronger route, refusing any
+    request that does not carry an assertion answering a sign-in this browser
+    started. So this test is unchanged and still means exactly what it says.
+
+    What replaces the token there is proved in tests/test_sso.py; that the
+    exemption is exactly one path is proved by
+    test_the_csrf_exemption_is_exactly_one_path.
+    """
     unprotected = []
     for method, path in _app_routes(app):
         if method != "POST":
@@ -203,6 +215,23 @@ def test_every_post_route_rejects_a_missing_csrf_token(app, requester_client):
         if response.status_code != 403:
             unprotected.append(f"POST {path} -> {response.status_code}")
     assert not unprotected, "these POST routes accepted a request with no CSRF token: " + str(unprotected)
+
+
+def test_the_csrf_exemption_is_exactly_one_path():
+    """One route may skip the token check. Exactly one, and on purpose.
+
+    /sso/acs cannot carry a CSRF token -- it is a cross-site form POST from
+    RIT's identity provider, which has never seen ours. What stands in for it
+    is a signed assertion answering a sign-in this browser started, single-use
+    and five minutes long; tests/test_sso.py proves each of those, including
+    that an assertion bound to a different browser is refused.
+
+    This test exists so that widening the exemption is a decision somebody has
+    to make and write down, rather than a line that quietly grows. If it
+    fails, the question to answer is not "how do I make this pass" but "what
+    replaces the token on the path I just added".
+    """
+    assert deps.CSRF_EXEMPT_PATHS == frozenset({"/sso/acs"})
 
 
 def test_a_wrong_csrf_token_is_rejected(requester_client):

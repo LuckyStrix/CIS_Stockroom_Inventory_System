@@ -3,7 +3,19 @@
 {% block content %}
 <div class="narrow">
   <h1>Sign in</h1>
-  <p class="lede">Stockroom accounts use your RIT email address.</p>
+
+  {# Three shapes, one page. In "sso" mode the route never renders this at all
+     -- it forwards to the identity provider -- so what is handled here is
+     "both", which is what a migration term looks like, and "password", which
+     is what has always been here. #}
+  {% if auth_mode == 'both' %}
+    <p class="lede">Use your RIT account.</p>
+    <a class="btn wide" href="/sso/login?next={{ next_url|urlencode }}">
+      Sign in with your RIT account</a>
+    <p class="or-divider"><span>or use a stockroom password</span></p>
+  {% else %}
+    <p class="lede">Stockroom accounts use your RIT email address.</p>
+  {% endif %}
 
   <div class="card">
     <form method="post" action="/login">

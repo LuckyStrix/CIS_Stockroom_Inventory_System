@@ -588,11 +588,36 @@ CREATE TABLE IF NOT EXISTS account (
     approved_at         TEXT,
     approved_by_id      INTEGER REFERENCES account(id),
     last_login_at       TEXT,
-    password_changed_at TEXT    NOT NULL
+    password_changed_at TEXT    NOT NULL,
+    -- Single sign-on. An account arrives through one door or the other:
+    -- auth_source 'password' has a real password_hash, 'sso' has '' and can
+    -- never be signed in by the password form, because an empty hash does
+    -- not parse and verify_password fails closed on one.
+    --
+    -- sso_uid is RIT's `uid`, which is stable; email is the join key on
+    -- first contact but is not guaranteed forever. affiliation is
+    -- ritEduAffiliation, stored because ITS asks what we keep and NOT
+    -- consulted for roles.
+    sso_uid             TEXT,
+    auth_source         TEXT    NOT NULL DEFAULT 'password'
+                        CHECK (auth_source IN ('password', 'sso')),
+    affiliation         TEXT    NOT NULL DEFAULT '',
+    last_sso_login_at   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_account_status ON account (status);
 CREATE INDEX IF NOT EXISTS idx_account_person ON account (person_id);
+
+-- One RIT account is one stockroom account. Partial, because every
+-- password-era row has sso_uid NULL and SQLite would otherwise treat only
+-- the first of them as unique.
+--
+-- Note that the CHECK on auth_source above reaches a fresh database only:
+-- ALTER TABLE cannot add a table-level constraint, so an upgrading Pi does
+-- not get it. accounts.py enforces the same rule in code for that reason --
+-- the same trap as loan.unit_id, see CLAUDE.md.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_sso_uid
+    ON account (sso_uid) WHERE sso_uid IS NOT NULL;
 
 
 -- ---------------------------------------------------------------------------
@@ -644,6 +669,65 @@ CREATE TABLE IF NOT EXISTS auth_attempt (
 
 CREATE INDEX IF NOT EXISTS idx_auth_attempt_email ON auth_attempt (email, at DESC);
 CREATE INDEX IF NOT EXISTS idx_auth_attempt_ip    ON auth_attempt (ip, at DESC);
+
+
+-- ---------------------------------------------------------------------------
+-- saml_auth_request: one sign-in we have started and not yet finished.
+--
+-- This is what replaces the CSRF token on /sso/acs -- the only POST in the
+-- application that cannot carry one, because it is a cross-site form POST
+-- from RIT's identity provider, which has never seen our token.
+--
+-- Three things have to line up before an assertion is accepted, and it is
+-- worth being precise about which one does which job:
+--
+--   request_id   the ID of the AuthnRequest we sent. The response names it in
+--                InResponseTo, which is covered by the IdP's signature, so it
+--                cannot be edited. This proves the response answers a question
+--                THIS SERVER asked.
+--   state_hash   SHA-256 of a nonce we put in a cookie on the way out. This
+--                proves the response came back to the SAME BROWSER that asked.
+--                It is the part that stops login CSRF, and it is not optional:
+--                request_id alone does not stop it, because an attacker can
+--                start a handshake, have RIT sign an assertion naming
+--                themselves, never complete it, and post it into your browser
+--                instead. The row would still be unconsumed and InResponseTo
+--                would still match.
+--   relay_state  echoed verbatim by the IdP. Belt to the above braces.
+--
+-- return_to lives here rather than in RelayState so the destination never
+-- travels through another organisation's server or its logs -- and so there
+-- is no caller-supplied redirect coming back from outside at all.
+--
+-- consumed_at makes an assertion good exactly once. It is set inside
+-- db.transaction(), whose BEGIN IMMEDIATE is what stops two concurrent
+-- replays both winning -- the same reason two people cannot check out the
+-- same last unit.
+--
+-- Rows are swept by `stockroom prune`; a browser that starts a sign-in and
+-- wanders off leaves one behind.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS saml_auth_request (
+    request_id  TEXT PRIMARY KEY,
+    state_hash  TEXT NOT NULL,
+    relay_state TEXT NOT NULL,
+    return_to   TEXT NOT NULL DEFAULT '/',
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    consumed_at TEXT,
+    ip          TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_saml_auth_request_expiry
+    ON saml_auth_request (expires_at);
+
+-- The handshake is looked up by the browser's cookie, not by the request ID:
+-- the ID is inside the assertion, and the assertion cannot be validated until
+-- we know which request it is supposed to answer. Starting from the cookie
+-- also means the browser binding is checked FIRST, before any attacker-
+-- supplied XML is parsed.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_saml_auth_request_state
+    ON saml_auth_request (state_hash);
 
 
 -- ---------------------------------------------------------------------------

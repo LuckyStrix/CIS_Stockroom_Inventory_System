@@ -329,7 +329,124 @@ def cmd_prune(args) -> int:
     sessions = accounts_module.prune_sessions(conn)
     with db.transaction(conn):
         attempts = security.prune_auth_attempts(conn, keep_days=args.keep_days)
-    print(f"Pruned {sessions} expired session(s) and {attempts} old login attempt(s).")
+    handshakes = security.prune_saml_handshakes(conn)
+    print(
+        f"Pruned {sessions} expired session(s), {attempts} old login attempt(s) "
+        f"and {handshakes} abandoned sign-in(s)."
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# single sign-on
+# ---------------------------------------------------------------------------
+
+# RIT's identity provider metadata. Fetched here and cached on disk rather
+# than read over the network during a sign-in: the Pi may be off the network,
+# and a login that hangs on somebody else's server is worse than one that
+# refuses.
+RIT_METADATA_URL = "https://shibboleth.main.ad.rit.edu/rit-metadata.xml"
+
+
+def cmd_sso_init(args) -> int:
+    """Generate the service provider keypair and cache RIT's metadata.
+
+    Safe to re-run: it never overwrites an existing key, because doing so
+    would silently invalidate a registration ITS have already accepted.
+    """
+    import subprocess
+    from urllib.request import urlopen
+
+    from . import saml
+
+    cert, key = config.SSO_SP_CERT, config.SSO_SP_KEY
+    cert.parent.mkdir(parents=True, exist_ok=True)
+
+    if cert.exists() and key.exists():
+        print(f"Keeping the existing service provider keypair in {cert.parent}.")
+    else:
+        host = (config.SSO_BASE_URL or "").removeprefix("https://").rstrip("/")
+        if not host:
+            print("Set STOCKROOM_SSO_BASE_URL first, e.g.")
+            print('    STOCKROOM_SSO_BASE_URL="https://cisstockroom.device.rit.edu"')
+            return 1
+        # Self-signed on purpose, and not the same thing as the TLS
+        # certificate. This key signs SAML, is published in our metadata, and
+        # is trusted because ITS pin it at registration -- no certificate
+        # authority is involved or wanted.
+        subprocess.run(
+            ["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+             "-days", "1095", "-keyout", str(key), "-out", str(cert),
+             "-subj", f"/CN={host}/O=CIS Stockroom"],
+            check=True, capture_output=True,
+        )
+        key.chmod(0o640)
+        print(f"Generated a SAML signing keypair for {host} in {cert.parent}.")
+        print("  NOTE: it expires in 3 years. Rotating it means telling ITS.")
+
+    if not config.SSO_IDP_METADATA.exists() or args.refresh:
+        try:
+            with urlopen(RIT_METADATA_URL, timeout=30) as response:
+                body = response.read()
+        except Exception as exc:
+            print(f"Could not fetch {RIT_METADATA_URL}: {exc}")
+            print("Download it by hand and save it as "
+                  f"{config.SSO_IDP_METADATA}.")
+            return 1
+        config.SSO_IDP_METADATA.parent.mkdir(parents=True, exist_ok=True)
+        config.SSO_IDP_METADATA.write_bytes(body)
+        print(f"Cached RIT's metadata ({len(body)} bytes) at "
+              f"{config.SSO_IDP_METADATA}.")
+    else:
+        print(f"Keeping the cached RIT metadata at {config.SSO_IDP_METADATA}.")
+        print("  Refresh it with: stockroom sso init --refresh")
+
+    problems = saml.missing_pieces()
+    if problems:
+        print("\nStill to do:")
+        for problem in problems:
+            print(f"  - {problem}")
+        return 1
+
+    print("\nReady. Give RIT ITS these, from docs/its-registration.md:")
+    print(f"  entityID   {saml.entity_id()}")
+    print(f"  ACS URL    {saml.acs_url()}")
+    print(f"  metadata   {config.SSO_BASE_URL}/sso/metadata")
+    return 0
+
+
+def cmd_sso_metadata(args) -> int:
+    """Print the metadata document ITS need, for attaching to the ticket."""
+    from . import saml
+
+    try:
+        print(saml.sp_metadata())
+    except saml.SamlError as exc:
+        print(f"Cannot generate metadata: {exc}")
+        return 1
+    return 0
+
+
+def cmd_sso_check(args) -> int:
+    """Say whether single sign-on would work, and what is missing if not."""
+    from . import saml
+
+    print(f"Auth mode: {config.AUTH_MODE}")
+    problems = saml.missing_pieces()
+    if problems:
+        for problem in problems:
+            print(f"  MISSING  {problem}")
+        return 1
+    print(f"  entityID {saml.entity_id()}")
+    print(f"  ACS URL  {saml.acs_url()}")
+    try:
+        saml.settings_dict()
+    except saml.SamlError as exc:
+        print(f"  BROKEN   {exc}")
+        return 1
+    print("  OK       settings, keypair and RIT metadata all load")
+    if config.AUTH_MODE == "password":
+        print("\nNote: STOCKROOM_AUTH_MODE is 'password', so none of this is in use.")
     return 0
 
 
@@ -617,6 +734,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-days", type=int, default=90,
                    help="how long to keep login attempt records (default 90)")
     p.set_defaults(func=cmd_prune)
+
+    # -- single sign-on ----------------------------------------------------
+    sso = sub.add_parser("sso", help="set up RIT single sign-on").add_subparsers(
+        dest="sso_command", required=True
+    )
+
+    p = sso.add_parser("init", help="make the SAML keypair and cache RIT's metadata")
+    p.add_argument("--refresh", action="store_true",
+                   help="re-fetch RIT's metadata even if a copy is cached")
+    p.set_defaults(func=cmd_sso_init)
+
+    sso.add_parser(
+        "metadata", help="print our metadata, for the ITS ticket"
+    ).set_defaults(func=cmd_sso_metadata)
+
+    sso.add_parser(
+        "check", help="say whether single sign-on is set up correctly"
+    ).set_defaults(func=cmd_sso_check)
 
     # -- accounts ----------------------------------------------------------
     user = sub.add_parser("user", help="manage accounts").add_subparsers(

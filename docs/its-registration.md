@@ -1,0 +1,152 @@
+# Registering this service provider with RIT ITS
+
+Everything the ITS ticket asks for, in one place. Open the ticket at
+<https://help.rit.edu/> (Single Sign-On integration request); RIT's
+[SSO — Deploying][deploy] page lists what they want.
+
+**Do this first.** It is a request to another team, it is the long pole, and
+no code change substitutes for it. The application ships with
+`STOCKROOM_AUTH_MODE="password"` and stays that way until this comes back.
+
+[deploy]: https://shibboleth.main.ad.rit.edu/ITSOperations/SSO---Deploying_22252854.html
+
+## Before you open the ticket
+
+Run this on the Pi, with `STOCKROOM_SSO_BASE_URL` set in `/etc/stockroom.env`:
+
+```bash
+sudo -u stockroom stockroom sso init      # keypair + cached RIT metadata
+sudo -u stockroom stockroom sso metadata  # the XML to attach
+```
+
+**Who owns this.** RIT's [Web Security Standard][webstd] §2.1 requires the
+department, owner, developer and administrator to be registered centrally and
+refreshed annually, and says the owner, developer and administrator **shall be
+an RIT employee**. A student employee can reasonably be listed as developer
+and administrator; the **owner should be a CIS faculty or staff member**
+regardless, because students graduate and the registration does not. Get your
+supervisor to open the ticket or be named on it — the storage and compliance
+answers below are departmental commitments, not one person's.
+
+[webstd]: https://www.rit.edu/security/sites/rit.edu.security/files/Web2017r1.pdf
+
+## 1. Service provider details
+
+| Field | Value |
+|---|---|
+| entityID | `https://cisstockroom.device.rit.edu/shibboleth` |
+| Assertion Consumer Service | `https://cisstockroom.device.rit.edu/sso/acs` |
+| ACS binding | HTTP-POST, index 0, default |
+| Metadata URL | `https://cisstockroom.device.rit.edu/sso/metadata` |
+| Single Logout | **none offered** — RIT's IdP publishes none either |
+| Host | `cisstockroom.device.rit.edu` → 129.21.66.182 |
+| Reachable from | the campus network only (ufw: 129.21.0.0/16 and the private ranges eduroam NATs behind) |
+| Implementation | `python3-saml`, the OneLogin Python toolkit RIT document |
+
+Attach the metadata document to the ticket as well as giving the URL — the
+host is firewalled to campus, so ITS may not be able to fetch it from wherever
+they are.
+
+## 2. Application purpose
+
+Inventory and checkout tracking for the RIT Carlson Center for Imaging Science
+stockroom. It records what equipment the stockroom owns, who has borrowed
+what, and when it came back. It runs on a Raspberry Pi on the stockroom
+network and is used by stockroom staff and by CIS students borrowing
+equipment.
+
+Single sign-on replaces locally-held passwords. That is the point of the
+request: the application currently stores scrypt password hashes, and would
+rather not hold credentials at all.
+
+## 3. Attributes requested, and what each is for
+
+| Attribute | Use |
+|---|---|
+| `uid` | The stable account identifier. Stored as `account.sso_uid` and used as the primary match, because email addresses can be reassigned and `uid` is not. |
+| `mail` | The account's email address. Also the one-time join key that links an existing password account to its RIT identity on first sign-in, so nobody re-registers. |
+| `givenName` | First name, shown in the interface and in the audit log. |
+| `sn` | Surname, likewise. |
+| `ritEduAffiliation` | Stored for the record. **Not used for authorisation** — roles are granted by hand by a stockroom administrator. |
+| `ritEduMemberOfUid` | Read but not currently used. Requested so that group-driven staff roles remain possible later without a second ticket. Say so if you would rather it were not released. |
+
+Authorisation is **not** derived from any attribute except by human decision.
+A first-time signer-in is created at the lowest role, which can only ask to
+borrow something.
+
+## 4. Storage plan for released attributes
+
+Asked explicitly by the ticket, and this application's answer is unusual
+enough to state plainly rather than let ITS discover it.
+
+- `uid`, `mail`, `givenName` and `sn` are stored in the `account` table on the
+  Pi, in SQLite, and refreshed from the assertion on each sign-in.
+  `ritEduAffiliation` is stored in the same row. `ritEduMemberOfUid` is not
+  stored.
+- The database file is `0640`, owned by the service account, on an
+  unencrypted SD card in a locked stockroom. Nightly snapshots go to the same
+  card and optionally to a USB stick or an rclone remote the department
+  controls.
+- **The audit log is append-only and its entries are never deleted.** It is a
+  SHA-256 hash chain, which is the point of the system — the stockroom needs
+  to be able to answer who had what and when, years later. A sign-in writes a
+  row naming the person. **So name and email are retained indefinitely and
+  cannot be erased without invalidating the chain.** This is deliberate, and
+  it is the answer to "storage plans for attributes".
+- Nothing is sent anywhere else. There is no analytics, no email, no external
+  service, and no internet exposure.
+
+## 5. ISO security standard compliance
+
+Against the [Web Security Standard][webstd]:
+
+| Clause | Status |
+|---|---|
+| §2 Registration | **To do as part of this ticket** — needs a faculty/staff owner of record. |
+| §3 Private information | **Not applicable.** The application holds names and RIT email addresses, which are Internal under the Information Access and Protection Standard. It holds no SSN, driver's licence or financial account data, so §3.1's VP-approval requirement is not triggered. |
+| §4 Vulnerability scanning | Available for ITS scanning from 129.21.0.0/16, which the firewall already permits. |
+| §6 Patching | `unattended-upgrades` is enabled by `deploy/harden-pi.sh`. **See the note below on `python3-saml`.** |
+| §7 Encryption | TLS 1.2+ only, forward secrecy, no legacy ciphers. Currently a self-signed certificate — **a trusted certificate for this hostname is a second thing to ask ITS for.** |
+| §8 Content filtering | Server-side validation on every input; a strict CSP with no `unsafe-inline`; no inline JavaScript anywhere. |
+| §9 Logging | Every change is recorded in a tamper-evident audit log. |
+| §10.1 Accounts | The service runs as its own unprivileged account; SSH is key-only. |
+| §10.2.1 New session ID on authentication | Yes — a fresh 256-bit token is minted on every sign-in, so a session fixed beforehand cannot be reused. |
+| §10.2.2 Session IDs not in cleartext | Yes — HTTPS only, `HttpOnly`, `__Host-` prefixed, `SameSite=Strict`, and only the SHA-256 of the token is stored. |
+| §11 Development | Documented conventions in `CLAUDE.md`; 800+ automated tests including a dedicated suite for this integration. |
+
+**Disclose this.** The `python3-saml` toolkit — which RIT's own documentation
+recommends for Python — last published a release in **October 2023**. Against
+§6.3 that is worth naming rather than hiding. The mitigation is that the
+entire toolkit is confined to one module (`src/stockroom/saml.py`) behind
+plain dataclasses, so replacing it with the actively-released `pysaml2` is a
+single-file change if ISO would prefer that. Ask them which they want.
+
+## 6. Questions to ask ITS
+
+1. **Do you require signed AuthnRequests?** (`STOCKROOM_SSO_SIGN_REQUESTS`)
+2. **Do you require encrypted assertions?** (`STOCKROOM_SSO_ENCRYPTED_ASSERTIONS`)
+3. **Can we get a browser-trusted TLS certificate for
+   `cisstockroom.device.rit.edu`?** It is currently self-signed. A certificate
+   warning in the middle of a sign-in redirect is where users abandon, and
+   `.device.rit.edu` may not be an eligible namespace — this is the question
+   to settle early. The SAML signing keypair is separate and is self-signed by
+   design; it does not need a certificate authority.
+4. **How will we know when the IdP signing certificate rotates?** A stale
+   cached copy of `rit-metadata.xml` fails every sign-in with a signature
+   error. `stockroom doctor` warns at six months; a heads-up is better.
+5. **Is MFA applied to this service?** ITS decide; the application requests no
+   particular authentication context and will not override the policy.
+6. **Expected turnaround**, so the migration term can be planned.
+
+## 7. After ITS say yes
+
+```bash
+sudo -u stockroom stockroom sso init --refresh   # fresh RIT metadata
+sudoedit /etc/stockroom.env                      # STOCKROOM_AUTH_MODE="both"
+sudo systemctl restart stockroom
+sudo -u stockroom stockroom sso check
+```
+
+Run `both` for a term so nobody is locked out, then `sso`. If anything goes
+wrong, set the mode back to `password` and restart — everyone with a password
+is back in immediately.

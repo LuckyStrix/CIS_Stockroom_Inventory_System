@@ -35,6 +35,18 @@ Environment variables (all optional):
     STOCKROOM_PHOTO_DIR               where uploaded item photos are stored
     STOCKROOM_PHOTO_MAX_PIXELS        longest edge after downscaling (1600)
     STOCKROOM_MAX_UPLOAD_BYTES        reject a request body larger than this
+    STOCKROOM_AUTH_MODE               "password" (default), "sso" or "both"
+    STOCKROOM_SSO_BASE_URL            the SP's own https:// origin, e.g.
+                                      https://cisstockroom.device.rit.edu
+    STOCKROOM_SSO_ENTITY_ID           default <base>/shibboleth
+    STOCKROOM_SSO_IDP_METADATA        cached copy of RIT's rit-metadata.xml
+    STOCKROOM_SSO_SP_CERT             the SP certificate (PEM)
+    STOCKROOM_SSO_SP_KEY              the SP private key (PEM)
+    STOCKROOM_SSO_AUTO_APPROVE        "0" to make a new SSO account wait for
+                                      staff approval (default: active at once)
+    STOCKROOM_SSO_HANDSHAKE_TTL       seconds a started sign-in stays valid (300)
+    STOCKROOM_SSO_SIGN_REQUESTS       "1" if ITS require signed AuthnRequests
+    STOCKROOM_SSO_ENCRYPTED_ASSERTIONS "1" if ITS require encrypted assertions
 """
 
 from __future__ import annotations
@@ -307,3 +319,84 @@ REQUEST_STALE_DAYS: int = int(os.environ.get("STOCKROOM_REQUEST_STALE_DAYS", "3"
 # cap never does.
 SESSION_IDLE_HOURS: int = int(os.environ.get("STOCKROOM_SESSION_IDLE_HOURS", "8"))
 SESSION_MAX_DAYS: int = int(os.environ.get("STOCKROOM_SESSION_MAX_DAYS", "7"))
+
+
+# ---------------------------------------------------------------------------
+# Single sign-on
+#
+# Three modes, because the RIT registration is a request to another team and
+# cannot be scheduled:
+#
+#   password  what this has always done. The default, and what runs until ITS
+#             has registered the service provider.
+#   both      the RIT button and the password form side by side. What a
+#             migration term looks like.
+#   sso       RIT only. /login sends you to the identity provider.
+#
+# An unrecognised value falls back to "password" rather than refusing to
+# start. A typo in /etc/stockroom.env must not lock the whole stockroom out of
+# its own inventory; the wrong sign-in page is recoverable, a service that
+# will not boot at 9am on a Monday is not.
+# ---------------------------------------------------------------------------
+AUTH_MODES = ("password", "sso", "both")
+
+
+def _load_auth_mode(raw: str) -> str:
+    mode = (raw or "").strip().lower() or "password"
+    if mode not in AUTH_MODES:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "STOCKROOM_AUTH_MODE=%r is not one of %s; falling back to 'password'",
+            raw, ", ".join(AUTH_MODES),
+        )
+        return "password"
+    return mode
+
+
+AUTH_MODE: str = _load_auth_mode(os.environ.get("STOCKROOM_AUTH_MODE", ""))
+
+# The SP's own origin. Every absolute URL SAML needs -- the entityID, the
+# assertion consumer service, the Destination and Recipient the toolkit
+# validates against -- is derived from this and never from the Host header.
+# That is deliberate: the application builds no absolute URL from Host (see
+# CLAUDE.md), and SAML is the one place where the temptation arises.
+SSO_BASE_URL: str = os.environ.get("STOCKROOM_SSO_BASE_URL", "").strip().rstrip("/")
+
+# The entityID RIT knows us by. Conventionally the base URL plus /shibboleth,
+# which is what RIT's own documentation uses, but it is settable because the
+# entityID is whatever ITS put in their configuration and it must match
+# exactly.
+SSO_ENTITY_ID: str = (
+    os.environ.get("STOCKROOM_SSO_ENTITY_ID", "").strip()
+    or (f"{SSO_BASE_URL}/shibboleth" if SSO_BASE_URL else "")
+)
+
+# RIT's IdP metadata, cached on disk. Never fetched during a request: the Pi
+# may be off the network, and a sign-in that hangs on somebody else's server
+# is worse than one that refuses. `stockroom sso refresh-metadata` updates it.
+SSO_IDP_METADATA: Path = _env_path(
+    "STOCKROOM_SSO_IDP_METADATA", Path("/etc/stockroom/rit-metadata.xml")
+)
+
+SSO_SP_CERT: Path = _env_path("STOCKROOM_SSO_SP_CERT", Path("/etc/stockroom/sp.crt"))
+SSO_SP_KEY: Path = _env_path("STOCKROOM_SSO_SP_KEY", Path("/etc/stockroom/sp.key"))
+
+# Whether a first-time SSO account is usable immediately. The identity
+# provider has proved who they are, and `requester` can do very little -- ask
+# to borrow something -- so the default is yes. Set "0" where the stockroom
+# would rather keep approval as a human gate on access rather than identity.
+SSO_AUTO_APPROVE: bool = _env_bool("STOCKROOM_SSO_AUTO_APPROVE", True)
+
+# How long a started sign-in stays valid. Short on purpose: this is the window
+# in which a stolen assertion could be replayed into another browser, and a
+# person who has just clicked "Sign in" does not need five minutes of it.
+SSO_HANDSHAKE_TTL_SECONDS: int = int(
+    os.environ.get("STOCKROOM_SSO_HANDSHAKE_TTL", "300")
+)
+
+# Both are asked of ITS at registration and set to whatever they answer.
+SSO_SIGN_REQUESTS: bool = _env_bool("STOCKROOM_SSO_SIGN_REQUESTS", False)
+SSO_ENCRYPTED_ASSERTIONS: bool = _env_bool(
+    "STOCKROOM_SSO_ENCRYPTED_ASSERTIONS", False
+)

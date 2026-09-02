@@ -10,6 +10,9 @@
 </p>
 
 <div class="grid two">
+  {# An SSO account has no password to change, and the route refuses one.
+     Showing the form anyway would be a control that 403s. #}
+  {% if subject.can_use_password %}
   <div class="card">
     <h2>Change password</h2>
     <form method="post" action="/account/password">
@@ -34,6 +37,16 @@
       <div class="hint">You will be signed out everywhere and need to sign in again.</div>
     </form>
   </div>
+  {% else %}
+  <div class="card">
+    <h2>Signing in</h2>
+    <p>You sign in with your RIT account, so there is no stockroom password
+       to change. Your password is managed by RIT.</p>
+    <p class="muted small">Signing out here ends your stockroom session. It
+       does not end your RIT session &mdash; RIT provides no way for us to do
+       that &mdash; so close the browser on a shared machine.</p>
+  </div>
+  {% endif %}
 
   <div class="card">
     <h2>Signed-in devices</h2>

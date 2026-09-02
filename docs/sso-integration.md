@@ -1,164 +1,231 @@
-# Future work: RIT single sign-on
+# RIT single sign-on
 
-**Status: planned, not implemented.** Today the system asks operators to type
-their name once and stores it in a cookie. This document is the plan for
-replacing that with real RIT authentication.
+**Status: implemented, and off by default.** The code is here and tested. It
+does nothing until `STOCKROOM_AUTH_MODE` is changed, which must not happen
+until RIT ITS have registered this service provider — see
+[its-registration.md](its-registration.md), which is the ticket.
 
-Reference: [RIT ITS — Single Sign-On (SSO)][rit-sso]. That page requires RIT
-credentials, so **read it and confirm the details below before starting the
-work** — the specifics of RIT's registration process are the one part of this
-plan written from general Shibboleth knowledge rather than from the page
-itself.
+Sources, all of which need RIT credentials to read:
 
-[rit-sso]: https://shibboleth.main.ad.rit.edu/ITSOperations/Single-Sign-On---SSO_22252855.html
+- [SSO — Deploying][deploy] · [Single Sign-On (SSO)][sso] ·
+  [SSO — Shibboleth Service Provider][sp] ·
+  [SSO — OneLogin Python SAML Toolkit][python]
+- RIT's IdP metadata: <https://shibboleth.main.ad.rit.edu/rit-metadata.xml>
+- [RIT Security Standard: Web][webstd] — the standard this deployment is bound by
 
-## What we have today
+[deploy]: https://shibboleth.main.ad.rit.edu/ITSOperations/SSO---Deploying_22252854.html
+[sso]: https://shibboleth.main.ad.rit.edu/ITSOperations/Single-Sign-On---SSO_22252855.html
+[sp]: https://shibboleth.main.ad.rit.edu/ITSOperations/SSO---Shibboleth-Service-Provider_22252900.html
+[python]: https://shibboleth.main.ad.rit.edu/ITSOperations/SSO---OneLogin-Python-SAML-Toolkit_22252902.html
+[webstd]: https://www.rit.edu/security/sites/rit.edu.security/files/Web2017r1.pdf
 
-Real accounts, held in this application: RIT email plus a password hashed with
-scrypt, server-side revocable sessions, staff approval before a new account can
-sign in, and role-based authorisation. See [security.md](security.md).
+## What an earlier draft of this document got wrong
 
-That is a genuine authentication system, and it is deliberately **interim**.
-Its weaknesses are the ones SSO exists to remove:
+It was written from general Shibboleth knowledge, said so, and asked to be
+checked against RIT's own pages before anyone built from it. That was the
+right instinct. Four things were wrong:
 
-- we are storing passwords, which is a liability we would rather not carry;
-- nothing verifies that an address belongs to the person who typed it — staff
-  approval is the only check;
-- there is no password reset, because there is no mail server;
-- it is one more credential for people to manage.
+| It said | RIT actually |
+|---|---|
+| request `displayName` | releases `givenName` + `sn`, which happen to match `account.first_name`/`last_name` exactly |
+| request `eduPersonPrincipalName` | releases `uid`, scoped `@rit.edu` |
+| request `eduPersonAffiliation` | releases `ritEduAffiliation`, plus `ritEduMemberOfUid` for groups |
+| "point Sign out at the Shibboleth logout URL" | **publishes no `SingleLogoutService` at all** |
 
-## Why the change is still small
+It also suggested `shibboleth-sp-utils` for nginx. There is no supported
+Shibboleth module for nginx; RIT document mod_shib for Apache and IIS only.
+And it marked in-app SAML "not recommended" — but that is one of the three
+options RIT document, and it is the one built here.
 
-All identity logic is in one function:
+## Why in-app SAML
+
+The alternatives were Apache + mod_shib replacing nginx, or nginx chaining to
+Apache on loopback. Both mean a second web server on a Raspberry Pi and a
+rewrite of `deploy/nginx-stockroom.conf`, which is carefully commented and
+pinned by tests. `python3-saml` is documented by RIT, keeps the single-server
+deployment, and puts the identity code under this project's own test suite.
+
+The cost is honest: `python3-saml`'s last release was v1.16.0 in **October
+2023**. RIT's Web Security Standard §6.3 says applications lacking
+developer-provided security patches shall be remediated or removed, so this
+is disclosed in the ITS ticket rather than left to be discovered. The
+mitigation is `stockroom/saml.py` — the *only* module that imports the
+toolkit, with everything crossing its boundary as plain dataclasses, so
+swapping it for `pysaml2` is one file.
+
+The objections the earlier draft raised against in-app SAML were fair, and
+each has an answer:
+
+- *certificate rotation* — RIT's metadata is cached on disk and refreshed with
+  `stockroom sso init --refresh`; `stockroom doctor` warns once the cache is
+  six months old, because a stale copy fails every sign-in with a signature
+  error that nobody guesses the cause of.
+- *signature validation* — the toolkit's, with `strict` on and
+  `wantAssertionsSigned` set. `tests/test_sso.py` proves an unsigned, wrongly
+  signed, tampered, expired, misaddressed or misaudienced assertion is refused.
+- *replay protection* — single-use handshake rows; see below.
+
+## The shape of it
 
 ```
-src/stockroom/web/deps.py :: current_account()
+browser ──TLS──> nginx ──> uvicorn (stockroom)
+                             │
+                             ├─ GET  /sso/login       -> AuthnRequest, 303 to RIT
+                             ├─ POST /sso/acs         <- signed SAMLResponse
+                             ├─ GET  /sso/metadata    -> our metadata, for ITS
+                             └─ GET  /sso/signed-out
 ```
 
-Everything downstream — every route, all five service modules, the audit log —
-receives an `Account` (or the `Actor` derived from it) and never asks where it
-came from. SSO replaces the body of that function and nothing else.
+**Single sign-on does not replace the identity seam, it feeds it.** `/sso/acs`
+finishes by calling `accounts.sso_login`, which writes an ordinary row in the
+`session` table and sets an ordinary cookie. `deps.current_account` is
+unchanged, and so is every route, all five service modules and the audit log.
+That is why this branch adds behaviour without touching any of them.
 
-> **Note for whoever does this work.** An earlier revision had
-> `current_actor()` read `X-Shib-*` request headers and prefer them over the
-> session. That was **removed on purpose**, and it should not be restored
-> casually: nginx currently passes client headers through, so trusting them
-> would let anyone on the LAN impersonate any user by setting a header. The
-> header path is only safe once the SP is actually in front of the app **and**
-> nginx explicitly clears those headers from client requests. Do both in the
-> same change, or neither.
+`deploy/nginx-stockroom.conf` needs **no change**, and its
+`proxy_set_header X-Shib-Mail ""` lines stay. The application never reads an
+identity header — `test_the_application_never_reads_an_identity_header`
+enforces that in the source — so the impersonation risk the earlier draft
+warned about never arises. **Do not "simplify" this by trusting a header.** On
+a campus-reachable host that is impersonation-as-a-service for anyone on the
+network.
 
-## Recommended approach: Shibboleth SP in front of the app
+## The one CSRF exemption, and what replaces it
 
-RIT runs a **Shibboleth SAML 2.0 identity provider**. The lowest-effort and
-most standard integration is to put the official Service Provider in front of
-the application rather than speaking SAML from Python.
+`/sso/acs` is the only POST in the application that does not check a CSRF
+token. It cannot: it is a top-level cross-site form POST from an identity
+provider that has never seen our token. The exemption is
+`deps.CSRF_EXEMPT_PATHS`, it has exactly one member, and
+`test_the_csrf_exemption_is_exactly_one_path` fails if it grows.
 
-```
-browser ──TLS──> nginx/Apache + mod_shib ──plain HTTP──> uvicorn (stockroom)
-                       │                                      │
-                       │  handles the whole SAML dance        │  reads
-                       └─> sets X-Shib-* request headers ─────┘  current_actor()
-```
+Three things must line up before an assertion is accepted, and it is worth
+being precise about which does which job:
 
-The SP handles metadata exchange, signing, encryption, session cookies and
-logout — all the parts that are easy to get subtly and dangerously wrong.
+1. **The signature**, checked against the IdP key in the cached metadata,
+   along with audience, recipient, destination and expiry.
+2. **`InResponseTo`**, which must name a sign-in *this server* started, and
+   which is covered by the signature so it cannot be edited.
+3. **A state cookie**, whose SHA-256 is stored on the handshake row, proving
+   the response came back to the *same browser* that asked.
 
-### Steps
+The third is not decoration, and the reasoning matters because the intuitive
+answer is wrong. The threat here is **login CSRF** — the attack `deps.py`
+already describes for `/login`: an attacker makes your browser complete *their*
+sign-in, you end up in their account, and they read what you do in it.
 
-1. **Get a stable public hostname and TLS certificate.** The IdP redirects the
-   browser back to a fixed Assertion Consumer Service URL, so the Pi needs a
-   real DNS name (e.g. `stockroom.cis.rit.edu`) and a valid certificate. This
-   almost certainly requires ITS to place the Pi somewhere appropriate on the
-   network.
+- The signature does not stop it. The assertion is genuinely signed by RIT.
+- `InResponseTo` alone does not stop it either. The attacker starts their own
+  sign-in, has RIT sign an assertion naming themselves, and simply never
+  completes it — so the row is unspent and the ID matches.
+- **The cookie stops it**, because the victim's browser does not have it.
 
-2. **Install and configure the SP.**
-   ```bash
-   sudo apt install libapache2-mod-shib   # or shibboleth-sp-utils for nginx
-   ```
-   Set `entityID` in `/etc/shibboleth/shibboleth2.xml`, generate SP keys, and
-   register the SP's metadata with RIT ITS.
+`test_an_assertion_bound_to_another_browser_is_refused` is that test, and it
+has been checked against a deliberately weakened implementation: remove the
+browser binding and it fails.
 
-3. **Register with RIT ITS.** Supply the entityID, ACS URL and metadata, and
-   request the attributes below. **This is the long pole** — it is a request to
-   another team, not a code change, so start it first.
+The handshake row is spent *before* the assertion is checked, so a signature
+failure burns it. That costs a legitimate user one extra click on a path that
+is already failing, and denies an attacker repeated attempts against a live
+handshake. Consumption is an `UPDATE ... WHERE consumed_at IS NULL` inside
+`db.transaction()`, so a replay loses a race rather than being merely unlikely
+to win one — the same `BEGIN IMMEDIATE` property that stops two people
+checking out the same last unit.
 
-4. **Request these attributes** (standard eduPerson; confirm exact names with
-   ITS):
+### The state cookie is `SameSite=None`, and has to be
 
-   | Attribute | Used for |
-   |---|---|
-   | `mail` | the `Actor.email`, and the join key to `person.email` |
-   | `displayName` | the `Actor.name` shown in the history |
-   | `eduPersonPrincipalName` | stable unique id, if `mail` ever changes |
-   | `eduPersonAffiliation` | staff/student/faculty, for the roles below |
+A `Lax` cookie is sent on a cross-site request only when it is a *navigation
+with a safe method*. RIT's reply is a cross-site **POST**, so `Lax` would mean
+the cookie never arrives and every sign-in fails. `None` requires `Secure`,
+which is why **single sign-on requires TLS**; plain HTTP falls back to `Lax`
+and an unprefixed name, which is enough for the test client and nothing else.
 
-5. **Protect the app and pass the attributes through.** Apache:
-   ```apache
-   <Location />
-       AuthType shibboleth
-       ShibRequestSetting requireSession 1
-       Require valid-user
+What bounds the risk is that the cookie is worth almost nothing: it is not the
+session, it is `HttpOnly`, it is single-use, it expires in five minutes, and
+the only thing it can do is finish one specific pending sign-in that also
+requires a signed assertion from RIT.
 
-       # Clear anything the client sent under these names FIRST. Without
-       # these two lines a user can simply set X-Shib-Mail themselves and
-       # become whoever they like -- this is the whole security of the
-       # header approach.
-       RequestHeader unset X-Shib-Mail
-       RequestHeader unset X-Shib-DisplayName
+### Rejected alternatives
 
-       RequestHeader set X-Shib-Mail        %{mail}e
-       RequestHeader set X-Shib-DisplayName %{displayName}e
-   </Location>
-   ```
-   The nginx equivalent, in `deploy/nginx-stockroom.conf`, is to set those
-   headers explicitly in the `location` block (an unset `proxy_set_header`
-   value clears the header) so a client-supplied value can never pass through.
+- **HTTP-Artifact binding** would make the ACS a GET and sidestep the question
+  entirely. RIT publishes no `ArtifactResolutionService`, and it needs a SOAP
+  back channel from the Pi. Not available.
+- **Put the CSRF token in `RelayState`.** Works, and leaves the middleware
+  untouched. Rejected because `RelayState` is logged by the IdP, and putting
+  our CSRF token in another organisation's logs is a needless disclosure.
+  `RelayState` stays an opaque nonce.
+- **A two-step ACS** (POST, then a one-time code, then a GET) does not remove
+  the tokenless POST, so it does not solve the problem, and does nothing
+  against login CSRF.
 
-6. **Leave the public page unauthenticated.** `/public/*` must stay open — the
-   whole point is that anyone can check stock without logging in. Exclude it
-   from the protected location.
+## Attributes
 
-### Code changes required
+Requested from ITS, and what each is for:
 
-Genuinely small, because the hard parts — roles, sessions, the audit trail —
-already exist:
+| Attribute | Used for |
+|---|---|
+| `uid` | `account.sso_uid` — the stable join key. Matched *first*. |
+| `mail` | `account.email`; the fallback join key on first sign-in only |
+| `givenName` / `sn` | `account.first_name` / `last_name`, straight across |
+| `ritEduAffiliation` | stored in `account.affiliation`; **not** used for roles |
+| `ritEduMemberOfUid` | parsed, currently unused; requested so group-driven roles stay possible without a second ticket |
 
-- `deps.py::current_account()` — resolve the account from the SP headers
-  instead of the session cookie, matching on `account.email`.
-- `accounts.py` — auto-provision an account on first SSO login, at role
-  `requester`. Approval is no longer needed for identity (the IdP has proved
-  it), though the stockroom may still want it for access.
-- Delete `login`, `register`, the password column and
-  `security.hash_password` / `verify_password`. **This is the win**: the
-  password liability goes away entirely.
-- `base.html` — point "Sign out" at the Shibboleth logout URL.
-- `nginx-stockroom.conf` — clear client-supplied `X-Shib-*` headers, as above.
+A Shibboleth IdP may send these under friendly names or as OID URNs depending
+on the release policy, so `saml._ATTRIBUTES` accepts either.
 
-### Roles carry over unchanged
+**Attributes only arrive when somebody authenticates.** RIT are explicit that
+SAML is not a queryable directory, so there is no way to look up a person who
+has not signed in. That is why borrower records are still just a name and an
+email — the stockroom lends to visitors with no RIT login at all.
 
-`requester` / `staff` / `admin` already exist and already gate every route.
-The only decision is how someone becomes staff: keep it manual (an admin
-promotes them, which is what happens now) or drive it from
-`eduPersonAffiliation`. Manual is probably right — "employee" is a much larger
-set than "works in this stockroom".
+## Roles
 
-### Migrating existing accounts
+Manual, unchanged. The IdP proves identity; it does not decide who works in
+this stockroom. A first sign-in provisions at `requester`, and an admin
+promotes from `/accounts` exactly as now. "Employee" is a far larger set than
+"works here", so driving `staff` off `ritEduAffiliation` would be wrong;
+driving it off a `ritEduMemberOfUid` group would need ITS to create and
+maintain one, which is a decision the stockroom can make later without any
+code change beyond reading a field that is already parsed.
 
-Accounts are keyed by RIT email, and so is the Shibboleth `mail` attribute, so
-existing accounts light up on first SSO login with their roles and history
-intact. Keep password login working for one term alongside SSO, then drop it.
+## Logout
 
-## Alternative: SAML inside the app
+**RIT's IdP publishes no `SingleLogoutService`.** Signing out therefore cannot
+end the RIT session, and no amount of code changes that. Do not invent a
+logout URL; one that 404s is worse than none.
 
-`python3-saml` or `pysaml2` can speak SAML directly from FastAPI, avoiding the
-Apache/nginx layer. **Not recommended**: it puts certificate rotation,
-signature validation and replay protection into our code, and TLS termination
-is wanted in front of the app anyway.
+`POST /logout` revokes the session row and clears the cookie as it always has.
+Under `sso` mode it then lands on `/sso/signed-out` rather than `/login` —
+because `/login` forwards to RIT, RIT still recognises the browser, and the
+person would be signed straight back in, so "Sign out" would visibly do
+nothing. That page says plainly that the RIT session is still open and that
+closing the browser is what finishes the job.
+
+This is a real residual risk on the counter machine, and the honest mitigations
+are a short `STOCKROOM_SESSION_IDLE_HOURS` and the habit of closing the
+browser — not a URL that does not exist.
+
+## Migrating
+
+Accounts are keyed by RIT email, and so is `mail`, so **existing accounts light
+up on first SSO sign-in** with their roles, history and person link intact.
+Nobody re-registers. The account keeps its password too, so it can use either
+door until the stockroom closes one.
+
+Run `both` for a term. Then `sso`. Deleting the password machinery — `login`,
+`register`, `change_password`, the lockout table, `security.hash_password` —
+is a separate change with its own migration, and should not happen until SSO
+has been working for long enough that nobody wants it back.
+
+**The escape hatch.** If single sign-on ever breaks — an expired certificate,
+an IdP outage, a metadata rotation nobody caught — set
+`STOCKROOM_AUTH_MODE="password"` in `/etc/stockroom.env` and
+`systemctl restart stockroom`. Everyone who has a password is back in
+immediately. That is the single most important operational sentence in this
+file, and it is the reason the password code is still here.
 
 ## Deliberately out of scope
 
-- **Authorising borrowers.** The person a loan is *tagged to* is still just a
-  name and email, and should stay that way — the stockroom lends things to
-  visitors and collaborators who have no RIT login.
-- **Login for the public page.** It stays open.
+- **Authorising borrowers.** The person a loan is tagged to stays a name and
+  an email. The stockroom lends to visitors and collaborators with no RIT
+  login, and SAML cannot tell us about someone who has not signed in anyway.
+- **The public page.** `/public/*` stays open to everyone, signed in or not.

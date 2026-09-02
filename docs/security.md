@@ -70,6 +70,46 @@ There is deliberately **no way to create an administrator over the network**.
 The first one is made with `stockroom user create --admin` by someone who
 already has shell access to the Pi.
 
+### Single sign-on
+
+`STOCKROOM_AUTH_MODE` selects `password` (the default), `both` or `sso`. Under
+the last two, RIT's Shibboleth identity provider authenticates people and this
+application never sees a password. Full detail in
+[sso-integration.md](sso-integration.md); the security-relevant points:
+
+- **An SSO sign-in produces an ordinary session.** It is not a parallel
+  identity mechanism — `/sso/acs` calls `accounts.sso_login`, which writes the
+  same `session` row the password path writes. Revocation, idle expiry and the
+  absolute cap all work unchanged.
+- **The application never reads `X-Shib-*` or `X-Remote-User`.** SAML is
+  spoken in-process. nginx still blanks those headers, and
+  `test_the_application_never_reads_an_identity_header` fails the build if any
+  code starts reading one. On a campus-reachable host, trusting such a header
+  would let anyone on the network become anyone.
+- **`/sso/acs` is the one POST with no CSRF token**, because it is a
+  cross-site POST from RIT. What replaces it is a signed assertion whose
+  `InResponseTo` names a sign-in this server started, bound by a `HttpOnly`
+  cookie to the browser that started it, single-use, and valid for five
+  minutes. The cookie is the part that stops login CSRF; the signature alone
+  does not, because the assertion is genuinely signed. `deps.CSRF_EXEMPT_PATHS`
+  has exactly one member and a test fails if it grows.
+- **That cookie is `SameSite=None`**, which is the only value that works for a
+  cross-site POST, and therefore **single sign-on requires TLS**. It is worth
+  very little on its own: not the session, one-time, five minutes,
+  `HttpOnly`, and useless without a signed assertion from RIT.
+- **An SSO account has no password.** `password_hash` is empty, and
+  `accounts.login` refuses it after spending the same CPU as a real
+  verification, so this does not become a way to ask who signs in with RIT.
+- **Signing out cannot end the RIT session.** RIT's identity provider
+  publishes no single-logout endpoint, so there is nothing to call. `/logout`
+  ends the stockroom session and `/sso/signed-out` says plainly that the
+  browser is still signed in to RIT. On the shared counter machine this is a
+  real residual risk; the mitigations are a short
+  `STOCKROOM_SESSION_IDLE_HOURS` and closing the browser.
+- **The escape hatch.** Set `STOCKROOM_AUTH_MODE="password"` and restart.
+  Everyone with a password is back in at once. That is why the password
+  machinery has not been deleted.
+
 ### On account enumeration
 
 Login and registration are careful not to reveal who has an account:

@@ -227,6 +227,43 @@ else
     exit 1
 fi
 
+# --------------------------------------------------------------------------
+# Single sign-on, if and only if it has been asked for.
+#
+# Everything here is skipped when STOCKROOM_AUTH_MODE is unset or "password",
+# which is the default and the state of the Pi until RIT ITS have registered
+# the service provider. That keeps a normal install exactly as fast and as
+# small as it has always been -- python3-saml pulls in lxml and xmlsec, which
+# are native extensions, and nobody should pay for them to run a stockroom on
+# passwords.
+# --------------------------------------------------------------------------
+( load_env_file "$ENV_FILE"
+  if [[ "${STOCKROOM_AUTH_MODE:-password}" != "password" ]]; then
+      say "Setting up RIT single sign-on"
+
+      # Build dependencies for xmlsec. A wheel usually exists for this
+      # architecture and none of this is needed; when one does not, the
+      # compile fails with a header error that reads like a Python problem.
+      apt-get install -y --no-install-recommends \
+          libxmlsec1-dev libxml2-dev pkg-config python3-dev
+
+      "$APP_DIR/.venv/bin/pip" install -q -e "$APP_DIR[sso]"
+
+      install -d -m 0755 /etc/stockroom
+      # Generates the SAML keypair and caches RIT's metadata. Never
+      # overwrites an existing key: doing so would silently invalidate a
+      # registration ITS have already accepted.
+      sudo -u "$SERVICE_USER" --preserve-env=STOCKROOM_AUTH_MODE,STOCKROOM_SSO_BASE_URL,STOCKROOM_SSO_ENTITY_ID,STOCKROOM_SSO_SP_CERT,STOCKROOM_SSO_SP_KEY,STOCKROOM_SSO_IDP_METADATA \
+          "$APP_DIR/.venv/bin/stockroom" sso init || {
+          echo "  Single sign-on is not ready yet. The service will still" >&2
+          echo "  start; see docs/its-registration.md." >&2
+      }
+      # The private key is read by the service, not by everyone on the Pi.
+      chgrp "$SERVICE_USER" /etc/stockroom/sp.key 2>/dev/null || true
+      chmod 0640 /etc/stockroom/sp.key 2>/dev/null || true
+  fi
+)
+
 say "Installing systemd units"
 install -m 0644 "$REPO_DIR/deploy/stockroom.service"        /etc/systemd/system/
 install -m 0644 "$REPO_DIR/deploy/stockroom-backup.service" /etc/systemd/system/

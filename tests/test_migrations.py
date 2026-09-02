@@ -49,6 +49,16 @@ def build_v2_database(path: Path, *, events: int = 5) -> Path:
         " VALUES (1, 1, 1, '2026-01-02T00:00:00Z', '2026-01-09T00:00:00Z',"
         " 'cli:setup', 'cli:setup')"
     )
+    # A password account from before single sign-on existed. v5 adds four
+    # columns to this table, and what matters on a real Pi is that this row
+    # survives the upgrade able to sign in exactly as it did before.
+    conn.execute(
+        "INSERT INTO account (first_name, last_name, email, password_hash,"
+        " role, status, created_at, updated_at, password_changed_at)"
+        " VALUES ('Alice', 'Nguyen', 'alice@rit.edu', 'scrypt$fake$hash',"
+        " 'staff', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',"
+        " '2026-01-01T00:00:00Z')"
+    )
     for n in range(events):
         conn.execute(
             "INSERT INTO event (at, actor, action, entity_type, entity_id,"
@@ -107,6 +117,31 @@ def test_the_columns_added_since_version_2_are_present(upgraded):
     assert "merged_into_id" in _columns(upgraded, "person")
     assert {"prev_hash", "hash"} <= set(_columns(upgraded, "event"))
     assert "unit_id" in _columns(upgraded, "loan")
+
+
+def test_an_account_from_before_sso_still_signs_in_with_its_password(upgraded):
+    """The v5 columns default to the truth about every account that predates them.
+
+    An account created before single sign-on existed did arrive by password,
+    which is exactly what auth_source defaults to -- so there is nothing to
+    backfill and, more importantly, nobody is locked out by the upgrade.
+    """
+    assert {"sso_uid", "auth_source", "affiliation", "last_sso_login_at"} <= set(
+        _columns(upgraded, "account")
+    )
+    rows = upgraded.execute(
+        "SELECT email, password_hash, auth_source, sso_uid FROM account"
+    ).fetchall()
+    assert rows, "no account in the v2 fixture -- this test would prove nothing"
+    for row in rows:
+        assert row["auth_source"] == "password"
+        assert row["password_hash"], "the upgrade must not blank a password"
+        assert row["sso_uid"] is None
+
+
+def test_the_handshake_table_arrives_with_the_upgrade(upgraded):
+    """A new table needs no _ADDED_COLUMNS entry -- schema.sql creates it."""
+    assert "saml_auth_request" in _tables(upgraded)
 
 
 def test_the_unit_column_survives_referencing_a_table_that_did_not_exist_yet(

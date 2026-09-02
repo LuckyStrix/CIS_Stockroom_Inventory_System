@@ -32,7 +32,7 @@ from pathlib import Path
 
 from . import config
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA_SQL = Path(__file__).with_name("schema.sql")
 _SCHEMA_FTS_SQL = Path(__file__).with_name("schema_fts.sql")
@@ -220,6 +220,21 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # that table does not exist yet when this runs: SQLite resolves foreign
     # keys when a row is written, not when the column is declared.
     ("loan", "unit_id", "INTEGER REFERENCES unit(id)"),
+    # v5: single sign-on. `sso_uid` is RIT's `uid` attribute -- the stable
+    # identifier, unlike email, which people do change. `auth_source` says
+    # which door an account came in through, so a password can never be set
+    # on an SSO account or vice versa. `affiliation` is ritEduAffiliation,
+    # recorded because ITS asks what we store, and deliberately NOT used to
+    # decide roles: "Employee" is a much larger set than "works here".
+    #
+    # sso_uid wants to be UNIQUE and cannot be: ALTER TABLE cannot add a
+    # constraint. The uniqueness is a partial index in schema.sql instead,
+    # which reaches both a fresh and an upgrading database because indexes
+    # run after this.
+    ("account", "sso_uid", "TEXT"),
+    ("account", "auth_source", "TEXT NOT NULL DEFAULT 'password'"),
+    ("account", "affiliation", "TEXT NOT NULL DEFAULT ''"),
+    ("account", "last_sso_login_at", "TEXT"),
 )
 
 
@@ -328,6 +343,12 @@ def _migrate(conn: sqlite3.Connection, *, from_version: int) -> None:
     # year is not recoverable from anything, so those rows honestly stay NULL.
     # The version still moves, so an older binary refuses this database
     # instead of quietly writing loans with no unit on them.
+
+    # 4 -> 5: single sign-on. Nothing to do. The four new account columns are
+    # added by _ensure_columns and their literal defaults are already right
+    # for every existing row -- an account that predates SSO did arrive by
+    # password, which is exactly what auth_source defaults to. The
+    # saml_auth_request table and the sso_uid index come from schema.sql.
 
 
 def _backfill_fts(conn: sqlite3.Connection) -> None:

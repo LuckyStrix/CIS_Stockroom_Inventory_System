@@ -292,7 +292,7 @@ def test_targets_are_built_from_configuration(temp_env, monkeypatch, tmp_path):
 def test_every_check_runs_against_an_empty_database(conn):
     """`doctor` must work on a Pi that was set up five minutes ago."""
     report = diagnostics.run_all(conn, skip_remote=True)
-    assert len(report.checks) == 11
+    assert len(report.checks) == 12
     assert all(isinstance(c.detail, str) and c.detail for c in report.checks)
 
 
@@ -380,4 +380,4 @@ def test_a_broken_check_becomes_a_finding_rather_than_a_crash(conn, monkeypatch)
     monkeypatch.setattr(diagnostics, "check_disk_space", explode)
     report = diagnostics.run_all(conn, skip_remote=True)
     assert "disk space" in [c.name for c in report.failures]
-    assert len(report.checks) == 11
+    assert len(report.checks) == 12

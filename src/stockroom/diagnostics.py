@@ -401,6 +401,49 @@ def check_data_consistency(conn: sqlite3.Connection) -> Check:
     return Check("data consistency", OK, "no impossible states found")
 
 
+def check_sso(conn: sqlite3.Connection | None = None) -> Check:
+    """Whether single sign-on is in the state the configuration says it is.
+
+    Silent in password mode, which is the default and not a fault. The failure
+    this exists to catch is the loud one: AUTH_MODE says sso and something is
+    missing, which means nobody can sign in at all.
+    """
+    from . import saml
+
+    if config.AUTH_MODE == "password":
+        return Check("single sign-on", OK, "not in use (auth mode: password)")
+
+    problems = saml.missing_pieces()
+    if problems:
+        # WARN rather than FAIL in "both" mode: the password form still works,
+        # so the stockroom is running, but the RIT button is broken.
+        level = FAIL if config.AUTH_MODE == "sso" else WARN
+        return Check("single sign-on", level,
+                     f"auth mode is {config.AUTH_MODE} but: " + "; ".join(problems))
+
+    try:
+        saml.settings_dict()
+    except saml.SamlError as exc:
+        return Check("single sign-on", FAIL, f"settings will not load: {exc}")
+
+    try:
+        cached = datetime.fromtimestamp(
+            config.SSO_IDP_METADATA.stat().st_mtime, tz=timezone.utc
+        )
+        age = _age_hours(cached)
+    except OSError:
+        age = None
+    detail = f"{config.AUTH_MODE} · {saml.entity_id()}"
+    if age is not None and age > 24 * 180:
+        # RIT rotate their signing certificate. Cached metadata that predates
+        # a rotation fails every sign-in with a signature error, and the fix
+        # -- `stockroom sso init --refresh` -- is not one anybody guesses.
+        return Check("single sign-on", WARN,
+                     f"{detail} · RIT metadata cached {_describe_age(age)}; "
+                     "refresh it with `stockroom sso init --refresh`")
+    return Check("single sign-on", OK, detail)
+
+
 # ---------------------------------------------------------------------------
 # running them
 # ---------------------------------------------------------------------------
@@ -421,6 +464,7 @@ def run_all(conn: sqlite3.Connection, *, skip_remote: bool = False) -> Report:
         ("disk space", lambda: check_disk_space(conn)),
         ("administrators", lambda: check_administrators(conn)),
         ("waiting queues", lambda: check_queues(conn)),
+        ("single sign-on", lambda: check_sso(conn)),
     ):
         try:
             checks.append(run())

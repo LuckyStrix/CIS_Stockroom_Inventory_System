@@ -645,6 +645,32 @@ def test_the_identity_headers_are_cleared_at_server_level():
         )
 
 
+def test_the_application_never_reads_an_identity_header():
+    """The other half of the two tests above, enforced in the source.
+
+    nginx blanks X-Shib-* and X-Remote-User so a client cannot send them. That
+    is worth something only while the application would not believe them
+    anyway. Single sign-on is spoken in-process -- see stockroom/saml.py -- so
+    there is no service provider in front of us setting those headers and no
+    reason for any code here to look at one.
+
+    This exists because the tempting shortcut, when SSO is being added, is
+    exactly the one docs/sso-integration.md warns about: read X-Shib-Mail and
+    trust it. On this deployment that is impersonation-as-a-service for
+    anybody on the campus network.
+    """
+    offenders = []
+    for path in sorted((_ROOT / "src" / "stockroom").rglob("*.py")):
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if "X-Shib" in code or "X-Remote-User" in code:
+                offenders.append(f"{path.name}:{number}")
+    assert not offenders, (
+        "these read an identity header the application must not trust: "
+        f"{offenders}"
+    )
+
+
 def test_no_proxying_location_sets_headers_of_its_own():
     """proxy_set_header does not merge -- it replaces.
 

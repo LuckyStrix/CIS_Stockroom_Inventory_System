@@ -345,6 +345,152 @@ def prune_auth_attempts(conn: sqlite3.Connection, *, keep_days: int = 90) -> int
 
 
 # ---------------------------------------------------------------------------
+# the SAML handshake
+#
+# One row per sign-in that has been started and not yet finished. This lives
+# here rather than in accounts.py for the same reason auth_attempt does: it is
+# pre-authentication mechanism, not a domain change, so it is outside the
+# audit rule by the same argument -- there is no actor yet, and a log of every
+# abandoned click on "Sign in" would bury the inventory history. The sign-in
+# that results IS audited, by accounts.sso_login.
+#
+# See the comment above the table in schema.sql for which of the three checks
+# does which job. The short version: request_id proves the response answers
+# something this server asked, state_token proves it came back to the browser
+# that asked, and only the second of those stops login CSRF.
+# ---------------------------------------------------------------------------
+
+
+class HandshakeError(Exception):
+    """A SAML response did not match a sign-in this browser started."""
+
+
+@dataclass(frozen=True, slots=True)
+class Handshake:
+    request_id: str
+    relay_state: str
+    return_to: str
+
+
+def open_saml_handshake(
+    conn: sqlite3.Connection,
+    *,
+    request_id: str,
+    state_token: str,
+    relay_state: str,
+    return_to: str = "/",
+    ip: str = "",
+    ttl_seconds: int | None = None,
+) -> None:
+    """Record a sign-in we are about to send to the identity provider.
+
+    `state_token` is the value that goes in the browser's cookie; only its
+    hash is stored, for the same reason session tokens are only stored as
+    hashes -- a database leak must not hand over live handshakes.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from . import config
+
+    ttl = config.SSO_HANDSHAKE_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(seconds=ttl)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    with db.transaction(conn):
+        conn.execute(
+            "INSERT INTO saml_auth_request "
+            "(request_id, state_hash, relay_state, return_to, created_at, "
+            " expires_at, ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                request_id,
+                token_hash(state_token),
+                relay_state,
+                return_to or "/",
+                db.utcnow(),
+                expires,
+                ip or "",
+            ),
+        )
+
+
+def consume_saml_handshake(
+    conn: sqlite3.Connection,
+    *,
+    state_token: str,
+    relay_state: str,
+) -> Handshake:
+    """Spend the sign-in this browser started, or raise :class:`HandshakeError`.
+
+    Looked up by the browser's cookie rather than by the assertion's
+    InResponseTo, for two reasons. The practical one is ordering: the request
+    ID lives inside the assertion, and the assertion cannot be validated
+    until we know which request it claims to answer, so something has to come
+    first. The better one is that starting here checks the browser binding
+    *before* any attacker-supplied XML is parsed at all.
+
+    Spending happens before the assertion is checked, which means a signature
+    failure burns the handshake and the person has to click Sign in again.
+    That is the right trade: it costs a legitimate user one click on a path
+    that is already failing, and it denies an attacker repeated attempts
+    against a live handshake.
+
+    Every failure raises the same exception. The caller renders a 403; the
+    reason is logged, not shown, because the detail is useful to somebody
+    probing this endpoint and to nobody else.
+
+    The UPDATE is guarded by `consumed_at IS NULL` inside a transaction, so a
+    replay loses a race rather than being merely unlikely to win one --
+    db.transaction()'s BEGIN IMMEDIATE is what makes that true, the same
+    property that stops two people checking out the same last unit.
+    """
+    if not state_token:
+        raise HandshakeError("no sign-in was started in this browser")
+
+    with db.transaction(conn):
+        row = conn.execute(
+            "SELECT * FROM saml_auth_request WHERE state_hash = ?",
+            (token_hash(state_token),),
+        ).fetchone()
+        if row is None:
+            raise HandshakeError("this sign-in was started in a different browser")
+        if not tokens_equal(row["relay_state"], relay_state or ""):
+            raise HandshakeError("relay state does not match")
+        if row["consumed_at"] is not None:
+            raise HandshakeError("this sign-in has already been completed")
+        if row["expires_at"] <= db.utcnow():
+            raise HandshakeError("this sign-in took too long")
+
+        spent = conn.execute(
+            "UPDATE saml_auth_request SET consumed_at = ? "
+            "WHERE request_id = ? AND consumed_at IS NULL",
+            (db.utcnow(), row["request_id"]),
+        )
+        if spent.rowcount != 1:
+            # Another request won the race between the SELECT and here.
+            raise HandshakeError("this sign-in has already been completed")
+
+        return Handshake(
+            request_id=row["request_id"],
+            relay_state=row["relay_state"],
+            return_to=row["return_to"] or "/",
+        )
+
+
+def prune_saml_handshakes(conn: sqlite3.Connection, *, keep_hours: int = 24) -> int:
+    """Drop handshakes nobody came back for. Called from `stockroom prune`."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=keep_hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    with db.transaction(conn):
+        cur = conn.execute(
+            "DELETE FROM saml_auth_request WHERE created_at < ?", (cutoff,)
+        )
+        return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
 # generic in-memory throttle, for non-credential endpoints
 # ---------------------------------------------------------------------------
 

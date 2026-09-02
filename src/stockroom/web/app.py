@@ -54,12 +54,14 @@ from . import (
     routes_loans,
     routes_people,
     routes_requests,
+    routes_sso,
 )
 from .deps import (
     CSRFError,
     require_account,
     Forbidden,
     _LoginRedirect,
+    is_csrf_exempt,
     is_public_path,
     login_url,
     utc_to_local,
@@ -242,10 +244,20 @@ async def security_middleware(request: Request, call_next):
             # what stops the development server, which has no nginx in front
             # of it, being asked to hold an unbounded body in memory.
             return finish(_too_large(request))
-        try:
-            verify_csrf(request, submitted)
-        except CSRFError as exc:
-            return finish(_error_page(request, 403, "Form expired", str(exc)))
+        # The size cap and the body read above still happen for every path,
+        # including the exempt one: _read_body_capped is what bounds a chunked
+        # body, and stashing the body is what lets the route read its form
+        # afterwards. Only the token check is skipped.
+        #
+        # /sso/acs is the only path that skips it, and it does not go
+        # unprotected -- deps.require_saml_handshake is a stronger control
+        # applied in its place, and that route still answers 403 to a request
+        # it refuses, exactly like every other POST here.
+        if not is_csrf_exempt(request.url.path):
+            try:
+                verify_csrf(request, submitted)
+            except CSRFError as exc:
+                return finish(_error_page(request, 403, "Form expired", str(exc)))
 
     return finish(await call_next(request))
 
@@ -534,6 +546,11 @@ def _error_page(request: Request, code: int, title: str, message: str):
             "summary": service.summary(db.connect()),
             "pending_requests": 0, "pending_accounts": 0,
             "ok": "", "error": "",
+            # base.html renders the sign-in link from these. An error page is
+            # exactly where somebody is most likely to want it, and an
+            # undefined variable would render href="".
+            "auth_mode": config.AUTH_MODE,
+            "sign_in_url": login_url(request.url.path),
         },
         status_code=code,
     )
@@ -733,5 +750,9 @@ app.include_router(routes_admin.router)
 app.include_router(routes_counter.router)
 app.include_router(routes_kits.router)
 app.include_router(routes_stocktake.router)
+# Registered whatever STOCKROOM_AUTH_MODE says. A route table that
+# changed shape with the configuration would mean the tests that walk it
+# only ever saw one shape of the application.
+app.include_router(routes_sso.router)
 
 app.mount("/static", StaticFiles(directory=str(_PACKAGE_DIR / "static")), name="static")

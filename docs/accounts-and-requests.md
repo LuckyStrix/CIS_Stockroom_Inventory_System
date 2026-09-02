@@ -19,6 +19,23 @@ plain about:
   decisions on requests. Staff work the inbox; requesters check
   `/requests/mine`. Tell people that when you approve them.
 
+### Once RIT single sign-on is turned on
+
+Both of those change. RIT proves the address belongs to the person, so
+approval stops being the verification step and becomes a decision about
+access — which is why a first sign-in creates a working `requester` account
+straight away unless `STOCKROOM_SSO_AUTO_APPROVE="0"` says otherwise.
+
+Nobody re-registers. Accounts are keyed by RIT email and so is the `mail`
+attribute, so an existing account lights up on its owner's first RIT sign-in
+with its role, its history and its person record intact.
+
+Single sign-on is off until ITS have registered the service — see
+[its-registration.md](its-registration.md). It is switched on with
+`STOCKROOM_AUTH_MODE` in `/etc/stockroom.env` (`both` during a migration
+term, then `sso`), and switched off again the same way if anything goes
+wrong.
+
 ### The first administrator
 
 Made from a shell on the Pi. There is deliberately no way to do it over the
