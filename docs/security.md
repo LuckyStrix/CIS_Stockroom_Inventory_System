@@ -147,20 +147,63 @@ and requests, and nobody else's.
 
 ## TLS
 
-`deploy/setup-pi.sh` generates a self-signed certificate with the right SANs.
-That **encrypts** traffic, which is the part that matters once there are
-passwords on the wire. It does **not authenticate the server**, so browsers
-warn until it is trusted.
+`deploy/setup-pi.sh` generates a self-signed certificate covering every name
+the Pi answers to: its fully qualified name, its short name, that name with
+`.local`, and its IP address. That **encrypts** traffic, which is the part that
+matters once there are passwords on the wire. It does **not authenticate the
+server**, so browsers warn until it is trusted.
 
 Two ways to fix that, in order of preference:
 
-1. **Get a certificate from RIT ITS** for a proper hostname. This is the real
-   answer, and it is the same conversation as SSO.
+1. **Get a certificate from RIT ITS** for the DNS name. Install it as
+   `/etc/ssl/stockroom/stockroom.crt` and `.key`, then
+   `sudo systemctl reload nginx` — the paths are already what nginx reads, so
+   there is no configuration change. This is the real answer, it needs no
+   client-side work at all, and it is the same conversation as SSO.
 2. **Trust the self-signed certificate** on the handful of stockroom machines.
    Copy `/etc/ssl/stockroom/stockroom.crt` and install it as a trusted root.
 
 Be honest about option 2's cost: teaching people to click through certificate
 warnings is a habit that hurts them elsewhere. Prefer option 1.
+
+Let's Encrypt is not an option here and is not worth attempting: HTTP-01
+requires the Pi to be reachable from the internet, which is a stated non-goal,
+and DNS-01 requires write access to the `rit.edu` zone, which is ITS's.
+
+### Two failures that look identical and are not
+
+A browser says roughly the same thing about an untrusted issuer and about a
+name the certificate does not cover, and the second is the one that wastes an
+afternoon: it is **not** fixed by installing the certificate as a trusted root,
+because the name is simply not in it. Which one you have:
+
+```bash
+openssl x509 -in /etc/ssl/stockroom/stockroom.crt -noout -checkhost "$(hostname -f)"
+```
+
+`does NOT match certificate` means the SANs are wrong — regenerate:
+
+```bash
+sudo rm /etc/ssl/stockroom/stockroom.crt /etc/ssl/stockroom/stockroom.key
+sudo deploy/setup-pi.sh
+```
+
+Re-running the installer keeps an existing certificate, so a Pi imaged under
+one name and later given a DNS record has to be told explicitly. It now warns
+when the certificate it is keeping does not cover the machine's own name.
+
+Note that `-checkhost` exits 0 either way — read the line it prints, do not
+test its status.
+
+### HSTS does nothing until the certificate is valid
+
+The app sends `Strict-Transport-Security` on any request that arrived over TLS,
+but a browser **ignores** an HSTS header received over a connection with
+certificate errors (RFC 6797 §8.1). So on a self-signed deployment the header
+is inert. Once a trusted certificate is in place it starts being honoured, and
+that hostname is pinned to HTTPS in every browser that has seen it for a year —
+which is the intent, but it does mean the host cannot be served over plain HTTP
+again without waiting the `max-age` out.
 
 ## Threats this design accepts
 

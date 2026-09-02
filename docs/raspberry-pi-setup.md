@@ -22,7 +22,12 @@ no need for a desktop.
 
 Before writing, open the settings (the gear icon) and set:
 
-- **Hostname:** `cis-stockroom` — this becomes `cis-stockroom.local`
+- **Hostname:** `cis-stockroom` — this becomes `cis-stockroom.local`. If ITS
+  has given the Pi a DNS record, set the hostname to match its first label
+  (the CIS one is `cisstockroom.device.rit.edu`, so `cisstockroom`): the TLS
+  certificate's names and the app's `Host` allow list are both derived from
+  the hostname, and they follow the qualified name only if the machine knows
+  it. `hostname -f` should print the full record
 - **Enable SSH**, with a password or your public key
 - **Username:** e.g. `stockroom-admin` (this is your login, not the service account)
 - **Wi-Fi**, only if you cannot use Ethernet
@@ -83,23 +88,32 @@ When it finishes:
 
 | | |
 |---|---|
-| Staff UI | `https://cis-stockroom.local/` |
-| Public page | `https://cis-stockroom.local/public/` (also plain HTTP) |
-| Health check | `https://cis-stockroom.local/health` |
+| Staff UI | `https://<pi>/` |
+| Public page | `https://<pi>/public/` (also plain HTTP) |
+| Health check | `https://<pi>/health` |
 
-The installer prints the Pi's IP address alongside these. Both work: the app
-answers to its own hostname, that name with `.local`, and any bare IP address.
-Phones and Chromebooks often cannot resolve `.local` at all, so the address is
-what you give people — which is why step 3 matters.
+`<pi>` is whatever the machine is called. The installer prints the exact URLs
+when it finishes, so use those rather than guessing. If the Pi has a DNS
+record — the CIS one is `cisstockroom.device.rit.edu` — that is the name to
+give people; otherwise it is the short hostname with `.local`.
+
+The installer prints the Pi's IP address alongside these, and all of them work:
+the app answers to its own qualified name, its short name, that name with
+`.local`, and any bare IP address. Phones and Chromebooks often cannot resolve
+`.local` at all, so on a Pi with no DNS record the address is what you hand
+out — which is why step 3 matters.
 
 If a browser gets **`Invalid host header`**, it reached the Pi under a name the
-app does not know (a DNS alias, say). The message names the header it refused
-and the hosts it accepts; add yours to `STOCKROOM_ALLOWED_HOSTS` in
-`/etc/stockroom.env` and `sudo systemctl restart stockroom`.
+app does not know (a second DNS alias, say). The message names the header it
+refused and the hosts it accepts; add yours to `STOCKROOM_ALLOWED_HOSTS` in
+`/etc/stockroom.env` and `sudo systemctl restart stockroom`. A `*.` wildcard
+works, so `STOCKROOM_ALLOWED_HOSTS="*.device.rit.edu"` covers a name that may
+move within the zone.
 
 Your browser will warn about the certificate — it is self-signed. That is
-expected; [security.md](security.md) covers trusting it, and why an
-ITS-issued certificate is the better answer.
+expected; [security.md](security.md) covers trusting it, why an ITS-issued
+certificate is the better answer, and how to tell that warning apart from the
+name-mismatch one, which trusting the certificate does **not** fix.
 
 ## 4b. Create the first administrator, and lock the Pi down
 

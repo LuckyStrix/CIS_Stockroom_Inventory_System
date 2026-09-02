@@ -538,6 +538,74 @@ def test_a_request_for_this_machines_hostname_is_accepted(client):
     assert client.get("/health", headers={"host": f"{host}.local"}).status_code == 200
 
 
+def test_the_qualified_name_is_accepted(monkeypatch):
+    """The name people actually type.
+
+    A real failure: the Pi was registered as cisstockroom.device.rit.edu, and
+    the default list -- built from `gethostname().split(".")[0]` -- held
+    `cisstockroom` and `cisstockroom.local` only. Every browser using the DNS
+    record got "Invalid host header" from a check that was written to stop
+    exactly that.
+    """
+    import socket
+    from stockroom import config
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "cisstockroom")
+    monkeypatch.setattr(socket, "getfqdn", lambda: "cisstockroom.device.rit.edu")
+
+    hosts = config._default_allowed_hosts()
+    assert "cisstockroom.device.rit.edu" in hosts
+    assert "cisstockroom" in hosts, "the short name still has to work"
+    assert "cisstockroom.local" in hosts, "and so does mDNS"
+
+
+def test_a_qualified_hostname_is_not_given_a_local_suffix(monkeypatch):
+    """When `hostname` itself is qualified, the short name is a truncation of
+    it -- not the whole thing with `.local` stapled on the end."""
+    import socket
+    from stockroom import config
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "cisstockroom.device.rit.edu")
+    monkeypatch.setattr(socket, "getfqdn", lambda: "cisstockroom.device.rit.edu")
+
+    hosts = config._default_allowed_hosts()
+    assert "cisstockroom.device.rit.edu" in hosts
+    assert "cisstockroom.local" in hosts
+    assert "cisstockroom.device.rit.edu.local" not in hosts
+
+
+@pytest.mark.parametrize("reported", ["localhost", "127.0.0.1", "cis-stockroom"])
+def test_an_unqualified_machine_gains_nothing(monkeypatch, reported):
+    """getfqdn() falls back to junk on a machine with no domain -- the short
+    name again, "localhost", or a bare address. None of it belongs on the list
+    as a *name*, and none of it must displace the short name that does."""
+    import socket
+    from stockroom import config
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "cis-stockroom")
+    monkeypatch.setattr(socket, "getfqdn", lambda: reported)
+
+    hosts = config._default_allowed_hosts()
+    assert hosts[:2] == ["cis-stockroom", "cis-stockroom.local"]
+    assert "localhost" in hosts  # from the loopback tail, not from getfqdn()
+    assert not any(h.startswith("127.0.0.1.") for h in hosts)
+
+
+def test_a_resolver_failure_does_not_break_startup(monkeypatch):
+    """config is imported by every entry point, including the CLI. A Pi whose
+    resolver is unreachable must still boot the service."""
+    import socket
+    from stockroom import config
+
+    def boom():
+        raise OSError("no resolver")
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "cis-stockroom")
+    monkeypatch.setattr(socket, "getfqdn", boom)
+
+    assert "cis-stockroom" in config._default_allowed_hosts()
+
+
 @pytest.mark.parametrize("host", ["10.14.2.31", "192.168.1.50:443", "[fe80::1]:443"])
 def test_a_bare_ip_address_is_accepted(client, host):
     """The documented fallback when mDNS does not work, and the only route

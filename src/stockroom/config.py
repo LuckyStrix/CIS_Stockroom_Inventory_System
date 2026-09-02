@@ -156,11 +156,42 @@ GITHUB_PAGES_BRANCH: str = os.environ.get("STOCKROOM_GITHUB_PAGES_BRANCH", "main
 # Pi is the name the Pi accepts, whatever it was called during imaging. That is
 # also where the TLS certificate's SANs come from, so the two agree by
 # construction.
+#
+# The fully qualified name has to be looked up separately. `hostname` on Debian
+# usually reports the SHORT name, with the qualified one recorded only in
+# /etc/hosts -- so taking `gethostname().split(".")[0]` and stopping there threw
+# away the name people actually type. A Pi registered as
+# cisstockroom.device.rit.edu answered its own short name and refused the FQDN,
+# which is the same "Invalid host header" wall this default was written to tear
+# down, one layer further in.
+def _fqdn() -> str:
+    """This machine's qualified name, or "" if it has none.
+
+    getfqdn() reads /etc/hosts before it asks DNS, which is where the name
+    lives on a Pi imaged with one. A resolver that is slow or absent must not
+    take the service down at import, hence the guard -- an unqualified machine
+    simply keeps the short-name-only behaviour.
+    """
+    try:
+        return socket.getfqdn().lower()
+    except OSError:  # pragma: no cover - resolver failure
+        return ""
+
+
 def _default_allowed_hosts() -> list[str]:
-    host = socket.gethostname().split(".")[0].lower()
+    reported = socket.gethostname().lower()
+    host = reported.split(".")[0]
+    names = [host, f"{host}.local"]
+    for candidate in (reported, _fqdn()):
+        # Must be this machine's own short name plus a domain. That one test
+        # rejects everything getfqdn() returns when there is no real domain --
+        # "localhost", a bare IP, the short name back again -- without having
+        # to enumerate those cases.
+        if candidate.startswith(f"{host}.") and candidate not in names:
+            names.append(candidate)
     # `testserver` is what Starlette's TestClient sends; the suite would
     # otherwise need every request to carry a Host header.
-    return [host, f"{host}.local", "localhost", "127.0.0.1", "::1", "testserver"]
+    return names + ["localhost", "127.0.0.1", "::1", "testserver"]
 
 
 _LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "::1"]

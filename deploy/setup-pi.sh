@@ -137,23 +137,63 @@ say "Setting up TLS"
 # part. It does NOT authenticate the server, so browsers will warn until it
 # is trusted on the machines that use it -- see docs/security.md, which also
 # explains why an ITS-issued certificate is the real fix.
+#
+# Drop a real certificate in as stockroom.crt/stockroom.key and this block
+# leaves it alone; nginx reads these paths either way.
 CERT_DIR=/etc/ssl/stockroom
 install -d -m 0755 "$CERT_DIR"
 
+# Every name this Pi can be reached by has to be a SAN, or the browser reports
+# a name mismatch and trusting the certificate does not help -- the name simply
+# is not in it.
+#
+# `hostname` alone is not enough for either half of this. On Debian it usually
+# prints the SHORT name while the qualified one lives in /etc/hosts, so a Pi
+# registered as cisstockroom.device.rit.edu got a certificate naming
+# `cisstockroom` and `cisstockroom.local` and nothing for the name anybody
+# types. And where `hostname` DOES print the FQDN, the old code appended
+# `.local` to it and generated a SAN for cisstockroom.device.rit.edu.local.
+# Hence: ask for both forms and derive the short one by truncation.
+HOST_FULL="$(hostname -f 2>/dev/null || hostname)"
+HOST_FULL="${HOST_FULL,,}"
+HOST_SHORT="${HOST_FULL%%.*}"
+HOST_IP="$(hostname -I | awk '{print $1}')"
+
+CERT_SANS="DNS:${HOST_SHORT},DNS:${HOST_SHORT}.local"
+CERT_CN="${HOST_SHORT}.local"
+if [[ "$HOST_FULL" != "$HOST_SHORT" && "$HOST_FULL" == *.* ]]; then
+    CERT_SANS="DNS:${HOST_FULL},${CERT_SANS}"
+    CERT_CN="$HOST_FULL"
+fi
+[[ -n "$HOST_IP" ]] && CERT_SANS="${CERT_SANS},IP:${HOST_IP}"
+
 if [[ ! -f "$CERT_DIR/stockroom.crt" ]]; then
-    HOST_SHORT="$(hostname)"
-    HOST_IP="$(hostname -I | awk '{print $1}')"
     openssl req -x509 -nodes -newkey rsa:2048 -days 1825 \
         -keyout "$CERT_DIR/stockroom.key" \
         -out "$CERT_DIR/stockroom.crt" \
-        -subj "/CN=${HOST_SHORT}.local/O=CIS Stockroom" \
-        -addext "subjectAltName=DNS:${HOST_SHORT},DNS:${HOST_SHORT}.local,IP:${HOST_IP}" \
+        -subj "/CN=${CERT_CN}/O=CIS Stockroom" \
+        -addext "subjectAltName=${CERT_SANS}" \
         2>/dev/null
     chmod 0640 "$CERT_DIR/stockroom.key"
     chgrp www-data "$CERT_DIR/stockroom.key"
-    echo "Generated a self-signed certificate for ${HOST_SHORT}.local (${HOST_IP})."
+    echo "Generated a self-signed certificate for ${CERT_SANS}."
 else
+    # Existing certificate: say whether it actually covers this machine's
+    # names. A Pi set up under one name and later given a DNS record keeps the
+    # certificate it was imaged with, and the resulting name mismatch looks
+    # exactly like the untrusted-issuer warning that is expected here -- so it
+    # gets ignored, and the only fix is a regeneration nothing prompts for.
     echo "Keeping the existing certificate in $CERT_DIR."
+    # `-checkhost` exits 0 whether or not it matched -- the answer is the text
+    # it prints, "does match certificate" or "does NOT match certificate". A
+    # bare `if ! openssl ...` here silently never fires.
+    if ! openssl x509 -in "$CERT_DIR/stockroom.crt" -noout \
+            -checkhost "$HOST_FULL" 2>/dev/null | grep -q "does match certificate"; then
+        echo "  WARNING: it does not cover ${HOST_FULL}, so browsers will report"
+        echo "  a name mismatch. To replace it with one that does:"
+        echo "      sudo rm ${CERT_DIR}/stockroom.crt ${CERT_DIR}/stockroom.key"
+        echo "      sudo ${BASH_SOURCE[0]}"
+    fi
 fi
 
 say "Configuring nginx"
@@ -242,7 +282,17 @@ if ! curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
     exit 1
 fi
 
-HOSTNAME_LOCAL="$(hostname).local"
+# The name to print. Prefer the qualified one when the Pi has it: that is what
+# people type and what the certificate now names. `$(hostname).local` was both
+# wrong on a Pi whose hostname is already qualified -- yielding
+# cisstockroom.device.rit.edu.local -- and, where it was right, still pointed
+# everyone at the mDNS name rather than the DNS record. HOST_FULL and
+# HOST_SHORT come from the TLS section above.
+if [[ "$HOST_FULL" != "$HOST_SHORT" && "$HOST_FULL" == *.* ]]; then
+    SITE_HOST="$HOST_FULL"
+else
+    SITE_HOST="${HOST_SHORT}.local"
+fi
 # Print the IP as well as the name. `.local` needs an mDNS resolver, which
 # Android and some Chromebooks do not have -- on those the address is the only
 # way in, and someone standing at the counter with a phone should not have to
@@ -254,9 +304,9 @@ cat <<EOF
 
   Stockroom is running.
 
-    Staff UI     https://${HOSTNAME_LOCAL}/       or  https://${LAN_IP}/
-    Public page  https://${HOSTNAME_LOCAL}/public/   (also on http://)
-    Health       https://${HOSTNAME_LOCAL}/health
+    Staff UI     https://${SITE_HOST}/       or  https://${LAN_IP}/
+    Public page  https://${SITE_HOST}/public/   (also on http://)
+    Health       https://${SITE_HOST}/health
 
   If a phone cannot open the .local name, use the address. Give the Pi a
   DHCP reservation on the router so that address does not move.
@@ -283,7 +333,7 @@ cat <<EOF
     1. Sign in and import existing stock:
          stockroom import stock.csv
          (add --commit once the dry run looks right)
-    2. Print barcode labels from  https://${HOSTNAME_LOCAL}/labels
+    2. Print barcode labels from  https://${SITE_HOST}/labels
     3. LOCK THE PI DOWN -- this script has not done it:
          sudo ./deploy/harden-pi.sh
          (allows 22/80/443 from the campus network, eduroam included;
