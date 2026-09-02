@@ -357,6 +357,41 @@ works but automatic updates do not, look for `publish failed` in
 publisher failing to push; the local page still updates, because publishing
 never blocks a change.
 
+**`/public/` returns nginx's own 404** while every staff page works. nginx
+serves that path from disk, so the file is not where nginx is looking — or it
+is, and nginx is not allowed to read it. `try_files` reports a permission
+denial as a miss, so both faults arrive as the same bare 404. Three things to
+run, in order:
+
+```bash
+stockroom doctor                          # names both faults in one line
+ls -ld /var/lib/stockroom /var/lib/stockroom/publish
+tail -20 /var/log/nginx/stockroom-error.log
+```
+
+- **`13: Permission denied` in the error log.** nginx needs `--x` on
+  `/var/lib/stockroom` (0751) and `r-x` on `publish/` (0755). If the data
+  directory reads `drwxr-x---` (0750), that is the fault: systemd re-applies
+  `StateDirectoryMode=` from `stockroom.service` on **every start**, so a unit
+  that disagrees with the installer undoes it at the next restart. Both say
+  0751 now; on a Pi installed before that, `sudo ./deploy/setup-pi.sh` puts
+  the corrected unit in place. `stockroom doctor` reports this as a warning on
+  the public page rather than the clean bill it used to give — the check runs
+  as the user who owns the directory, so "the page is there" was always true
+  and never the question.
+- **No such file.** The page has never been generated — nothing has been
+  checked in or out since setup — and `stockroom publish` is the whole fix.
+- **The file is somewhere else.** `grep PUBLISH /etc/stockroom.env` against
+  the `alias` in `/etc/nginx/sites-available/stockroom`: the app writes to the
+  first, nginx serves the second.
+
+Both `/public/` blocks now fall through to the application when nginx cannot
+serve the file itself, so the page keeps working while you sort the underlying
+cause out, and the app says which cause it is. A *bare* nginx 404 therefore
+means the config on the Pi predates that change: reinstall it with
+`sudo ./deploy/setup-pi.sh`, or copy `deploy/nginx-stockroom.conf` into place,
+`nginx -t`, `systemctl reload nginx`.
+
 **"Database is locked".** Two writers collided and one waited past five
 seconds. This should not happen at stockroom scale — check for a second
 `stockroom` process (`systemctl status stockroom`; there should be one

@@ -313,6 +313,35 @@ def test_a_healthy_system_passes(conn, actor, item, tmp_path, monkeypatch):
     assert report.ok, [str(c.name) + ": " + c.detail for c in report.failures]
 
 
+def test_a_published_page_nginx_cannot_read_is_a_warning(conn, tmp_path):
+    """The 404 that took an afternoon: the page was there and unreachable.
+
+    nginx serves /public/ from disk as www-data, and `try_files` reports a
+    permission denial as a miss -- so a mode that costs it the traverse bit
+    produces a plain 404 for a file that is present. This check used to say
+    "rebuilt 2 minutes ago" throughout, because it runs as the user who owns
+    the directory. (The cause was StateDirectoryMode=0750 in the unit being
+    re-applied over the installer's 0751 on every restart; see
+    tests/test_deploy.py.)
+    """
+    from stockroom.publish.render import render_site
+
+    config.PUBLISH_DIR.mkdir(parents=True, exist_ok=True)
+    for name, body in render_site(conn).items():
+        (config.PUBLISH_DIR / name).write_text(body)
+    assert diagnostics.check_publish(conn).status == diagnostics.OK
+
+    config.PUBLISH_DIR.chmod(0o750)
+    try:
+        check = diagnostics.check_publish(conn)
+    finally:
+        config.PUBLISH_DIR.chmod(0o755)
+
+    assert check.status == diagnostics.WARN
+    assert str(config.PUBLISH_DIR) in check.detail
+    assert "404" in check.detail, "say what the symptom looks like from outside"
+
+
 def test_a_tampered_audit_log_fails_the_health_check(conn, actor, item):
     conn.execute("UPDATE event SET summary = 'rewritten' WHERE id = 1")
     conn.commit()

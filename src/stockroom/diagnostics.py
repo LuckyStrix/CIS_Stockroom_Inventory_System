@@ -250,6 +250,46 @@ def _unwritable_reason(target) -> str:
     return ""
 
 
+def _blocked_from_the_web_server() -> str:
+    """Whether nginx could actually read the generated page, or only we can.
+
+    It serves /public/ from disk as www-data, so it needs the traverse bit on
+    every directory down to the page and r-x on the one holding it. This is a
+    different question from "has the page been generated", and from the
+    counter the two look identical: try_files reports a permission denial as a
+    miss, so the browser gets a 404 for a file that is sitting right there --
+    and this check reported the page present all along, because the service
+    user owns it and could always see it.
+
+    Returns a description of the first problem, or "" if there is none.
+    """
+    page = config.PUBLISH_DIR / "index.html"
+    wanted: list[tuple[Path, int, str]] = [(config.PUBLISH_DIR, 0o005, "enter")]
+
+    # Everything between the data directory and the page must be walkable too.
+    # Only as far as the data directory, though, and no further: on a
+    # developer's machine the path above it runs through a home directory
+    # whose mode is nobody else's business.
+    if config.PUBLISH_DIR.is_relative_to(config.DATA_DIR):
+        parent = config.PUBLISH_DIR.parent
+        while True:
+            wanted.append((parent, 0o001, "traverse"))
+            if parent == config.DATA_DIR or parent == parent.parent:
+                break
+            parent = parent.parent
+
+    wanted.append((page, 0o004, "read"))
+
+    for target, needed, verb in wanted:
+        try:
+            mode = target.stat().st_mode & 0o777
+        except OSError:
+            continue  # a missing path is the caller's other checks to report
+        if mode & needed != needed:
+            return f"nginx cannot {verb} {target} ({mode:04o})"
+    return ""
+
+
 def check_publish(conn: sqlite3.Connection | None = None) -> Check:
     index = config.PUBLISH_DIR / "index.html"
     feed = config.PUBLISH_DIR / "inventory.json"
@@ -265,6 +305,14 @@ def check_publish(conn: sqlite3.Connection | None = None) -> Check:
     except json.JSONDecodeError as exc:
         return Check("public page", FAIL, f"inventory.json is not valid JSON: {exc}")
     age = _age_hours(datetime.fromtimestamp(index.stat().st_mtime, tz=timezone.utc))
+    blocked = _blocked_from_the_web_server()
+    if blocked:
+        return Check(
+            "public page", WARN,
+            f"rebuilt {_describe_age(age)}, but {blocked} -- /public/ will "
+            "answer 404 with the page present (deploy/setup-pi.sh restores "
+            "the modes)",
+        )
     return Check("public page", OK, f"rebuilt {_describe_age(age)}, feed parses")
 
 

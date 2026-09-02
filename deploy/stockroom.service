@@ -62,11 +62,21 @@ StateDirectory=stockroom
 # account on the Pi can read the lot -- security.py reasons carefully about
 # someone stealing the SD card and not at all about someone with a shell.
 #
-# 0750 on the directory and 0027 on new files keeps it to the service user and
-# its group. The publish directory is widened back to 0755 by setup-pi.sh, and
-# the files inside it are chmod'ed 0644 explicitly by publish/publishers.py --
-# nginx serves those, and only those.
-StateDirectoryMode=0750
+# 0751 on the directory and 0027 on new files keeps its contents to the service
+# user and its group: others get the traverse bit (--x) and nothing else, so
+# they can walk through to a path they already know and cannot list what is
+# here or open the database. The publish directory is 0755 and the files in it
+# are chmod'ed 0644 by publish/publishers.py -- nginx serves those, and only
+# those.
+#
+# It must be 0751 and not 0750, and it must match `chmod 0751 "$DATA_DIR"` in
+# setup-pi.sh: systemd re-applies this mode on EVERY start, so a stricter value
+# here silently undoes the installer the first time the service restarts. That
+# is what it did. Without the traverse bit nginx cannot reach publish/index.html
+# however open publish/ itself is, and `try_files` reports a permission denial
+# as a miss -- so the public page answered 404 with the file sitting right
+# there, while every proxied staff page carried on working.
+StateDirectoryMode=0751
 UMask=0027
 
 StandardOutput=journal

@@ -187,8 +187,31 @@ def test_the_database_is_not_world_readable():
     and not at all about somebody with a shell.
     """
     unit = (_DEPLOY / "stockroom.service").read_text()
-    assert "StateDirectoryMode=0750" in unit
+    assert "StateDirectoryMode=0751" in unit, (
+        "0750 removes the traverse bit nginx needs; 0755 exposes the database"
+    )
     assert "UMask=0027" in unit
+
+
+def test_the_unit_and_the_installer_agree_on_the_data_directory_mode():
+    """systemd re-applies StateDirectoryMode on every start.
+
+    So the installer's `chmod` is not the last word: whatever the unit says
+    wins from the next restart onwards. They drifted to 0751 and 0750, which
+    cost www-data the traverse bit into publish/ and made the public page
+    return 404 -- with the file present, and doctor reporting it present,
+    because the service user owns the directory and could always see it.
+    """
+    unit = (_DEPLOY / "stockroom.service").read_text()
+    installer = (_DEPLOY / "setup-pi.sh").read_text()
+
+    unit_mode = re.search(r"^StateDirectoryMode=(\d+)$", unit, re.M)
+    installer_mode = re.search(r'chmod (\d+) "\$DATA_DIR"$', installer, re.M)
+    assert unit_mode and installer_mode, "one of the two stopped setting a mode"
+    assert unit_mode.group(1) == installer_mode.group(1), (
+        f"the unit sets {unit_mode.group(1)} and the installer "
+        f"{installer_mode.group(1)}; systemd wins on the next restart"
+    )
 
 
 def test_the_installer_does_not_widen_the_data_directory():
@@ -585,3 +608,77 @@ def test_the_installer_restarts_the_service():
     assert not re.search(r"^systemctl enable --now stockroom\.service", body, re.M), (
         "`enable --now` is a no-op on a running unit -- use restart"
     )
+
+
+# ---------------------------------------------------------------------------
+# the nginx configuration
+# ---------------------------------------------------------------------------
+
+_NGINX = _DEPLOY / "nginx-stockroom.conf"
+
+# No block in this file nests another, so a non-greedy match to the first `}`
+# is an accurate reading of it -- and it fails loudly (by matching too little)
+# if that ever stops being true. Anchored to the start of a line: the word
+# "location" also appears in the comments, and an unanchored match started
+# there and swallowed the server-level directives that follow.
+_LOCATION = re.compile(r"^[ \t]*location\s+([^{\n]+?)\s*\{(.*?)\}", re.S | re.M)
+
+_IDENTITY_HEADERS = ("X-Shib-Mail", "X-Shib-DisplayName", "X-Remote-User")
+
+
+def _locations() -> list[tuple[str, str]]:
+    return [(m.group(1), m.group(2)) for m in _LOCATION.finditer(_NGINX.read_text())]
+
+
+def test_the_identity_headers_are_cleared_at_server_level():
+    """nginx forwards whatever the client sent unless told otherwise.
+
+    docs/sso-integration.md: trusting X-Shib-* is impersonation-as-a-service,
+    so nginx overwrites them with empty values -- which stops them being
+    forwarded at all. They live outside any location so that every proxying
+    location gets them.
+    """
+    outside = _LOCATION.sub("", _NGINX.read_text())
+    for header in _IDENTITY_HEADERS:
+        assert f'proxy_set_header {header} "";' in outside, (
+            f"{header} is not cleared at server level; a client could send it"
+        )
+
+
+def test_no_proxying_location_sets_headers_of_its_own():
+    """proxy_set_header does not merge -- it replaces.
+
+    A location that sets one header of its own inherits *none* of the server's,
+    so adding `proxy_set_header X-Anything` to a location that proxies would
+    silently start forwarding the client's X-Shib-* headers again. Either
+    repeat the whole list there, or (better) do not set any.
+    """
+    for name, body in _locations():
+        if "proxy_pass" not in body:
+            continue
+        assert "proxy_set_header" not in body, (
+            f"location {name.strip()} sets its own headers, so it inherits "
+            "none of the server-level ones -- including the X-Shib-* clearing"
+        )
+
+
+def test_the_public_page_falls_back_to_the_application():
+    """A miss on /public/ must not be answered by nginx itself.
+
+    nginx serves that path from disk, so `=404` was returned for two quite
+    different faults -- the page has never been generated, or
+    STOCKROOM_PUBLISH_DIR and this alias name different directories -- and
+    said neither. The application serves the same directory and can tell them
+    apart, so it gets the request instead.
+    """
+    blocks = [(n, b) for n, b in _locations() if n.strip() == "/public/"]
+    assert len(blocks) == 2, "expected a /public/ location on both 80 and 443"
+    for name, body in blocks:
+        assert "try_files" in body
+        assert "=404" not in body, (
+            "a bare nginx 404 on the public page tells nobody which fault it is"
+        )
+        assert re.search(r"try_files\s[^;]*\s@\w+;", body), (
+            "the last try_files argument must be a named location to fall "
+            "back to, not a status code"
+        )
