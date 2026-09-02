@@ -13,6 +13,8 @@ answers "is one free?", not "who has it?".
 
 from __future__ import annotations
 
+import base64
+import functools
 import json
 import sqlite3
 from typing import Any
@@ -26,6 +28,7 @@ from ..requests_service import list_open_hours
 from ..service import audit_head, list_items, list_loans, summary
 
 _TEMPLATE_DIR = __import__("pathlib").Path(__file__).resolve().parent.parent / "templates"
+_STATIC_DIR = _TEMPLATE_DIR.parent / "static"
 
 _env = Environment(
     loader=FileSystemLoader(_TEMPLATE_DIR),
@@ -99,6 +102,22 @@ def build_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     return payload
 
 
+@functools.lru_cache(maxsize=1)
+def _favicon_data_uri() -> str:
+    """The app's icon, inlined so the public page stays a single file.
+
+    Read from ``static/favicon.svg`` -- the same file the private app links --
+    rather than copied into the template, so the two cannot drift apart. It
+    has to be a ``data:`` URI: a ``/static/`` URL is dead the moment the page
+    is opened from a USB stick or GitHub Pages, and a browser that cannot
+    fetch the icon falls back to a blank page glyph. The page's own CSP allows
+    it because a ``<link rel=icon>`` is fetched under ``img-src``, which names
+    ``data:``.
+    """
+    raw = (_STATIC_DIR / "favicon.svg").read_bytes()
+    return "data:image/svg+xml;base64," + base64.b64encode(raw).decode("ascii")
+
+
 def _json_for_script(data: Any) -> str:
     """Serialize data for embedding in a ``<script>`` block.
 
@@ -144,7 +163,6 @@ def _csp_hashes(html: str) -> tuple[list[str], list[str]]:
     ``application/json`` payload) is skipped -- the browser never runs it, so
     ``script-src`` never consults it.
     """
-    import base64
     import hashlib
     import re
 
@@ -181,6 +199,7 @@ def render_site(conn: sqlite3.Connection) -> dict[str, str]:
         summary=payload["summary"],
         show_borrowers=config.PUBLIC_SHOW_BORROWERS,
         open_hours=payload["open_hours"],
+        favicon=_favicon_data_uri(),
         data_json=Markup(_json_for_script(payload["items"])),
         csp="",
     )
@@ -204,6 +223,7 @@ def render_site(conn: sqlite3.Connection) -> dict[str, str]:
         summary=payload["summary"],
         show_borrowers=config.PUBLIC_SHOW_BORROWERS,
         open_hours=payload["open_hours"],
+        favicon=_favicon_data_uri(),
         data_json=Markup(_json_for_script(payload["items"])),
         csp=policy,
     )

@@ -1,6 +1,7 @@
 """Rendering the public page, debouncing, and failure isolation."""
 
 import json
+import re
 import time
 
 import pytest
@@ -75,6 +76,35 @@ def test_the_embedded_data_is_parseable_json(stocked):
     assert items[0]["name"] == "SanDisk 64GB SD Card"
     assert items[0]["available"] == 7
     assert "&#34;" not in render.render_site(stocked)["index.html"]
+
+
+def test_the_page_carries_the_apps_own_icon(stocked):
+    """Same icon as the private app, inlined -- a /static/ URL would be dead
+    in a copy of the file opened from a USB stick."""
+    import base64
+    import pathlib
+
+    html = render.render_site(stocked)["index.html"]
+    svg = (pathlib.Path(render.__file__).resolve().parent.parent
+           / "static" / "favicon.svg").read_bytes()
+    expected = base64.b64encode(svg).decode("ascii")
+
+    assert f'<link rel="icon" href="data:image/svg+xml;base64,{expected}">' in html
+
+
+def test_the_icon_is_allowed_by_the_pages_own_policy(stocked):
+    """A rel=icon link is fetched under img-src, which must name data:."""
+    import html as htmllib
+
+    page = render.render_site(stocked)["index.html"]
+    meta = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', page)
+    assert meta, "the page rendered without its CSP"
+    # The attribute is HTML-escaped on the way in; a browser decodes it before
+    # parsing the policy, and so must this test -- &#39; would otherwise split
+    # the directive list on its own semicolon.
+    directives = htmllib.unescape(meta.group(1)).split("; ")
+    img_src = [d for d in directives if d.startswith("img-src ")]
+    assert img_src and "data:" in img_src[0]
 
 
 def test_html_cannot_be_broken_out_of_by_item_text(conn, actor):
