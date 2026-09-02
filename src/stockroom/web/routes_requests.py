@@ -68,7 +68,14 @@ def my_requests(request: Request):
 
 
 @router.get("/requests/new/{kind}", response_class=HTMLResponse)
-def new_request_form(request: Request, kind: str):
+def new_request_form(request: Request, kind: str, item_id: int = 0):
+    """The blank request form.
+
+    `item_id` preselects the equipment dropdown, so "Request to borrow" on an
+    item page arrives with the item already chosen. It is a convenience, not a
+    permission: the value only ever selects an <option> that is already in the
+    list, and submit_borrow re-reads whatever the form actually posts.
+    """
     require_account(request)
     if kind not in rq.KINDS:
         return redirect("/requests/mine", error="Unknown request type.")
@@ -79,6 +86,7 @@ def new_request_form(request: Request, kind: str):
         kind=kind,
         kind_label=rq.KIND_LABELS[kind],
         items=service.list_items(conn) if kind == "borrow" else [],
+        selected_item_id=item_id,
     )
 
 

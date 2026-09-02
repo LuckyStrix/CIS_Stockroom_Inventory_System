@@ -52,13 +52,47 @@ stockroom is countable and has no `unit` rows at all.
 
 ## Security invariants
 
-Two tests in `tests/test_authz.py` enumerate the application's real route table:
+Five tests in `tests/test_authz.py` enumerate the application's real route table:
 
 - **every route** is either on `deps.PUBLIC_PATHS` or rejects anonymous callers;
-- **every POST** rejects a request with no CSRF token.
+- **every POST** rejects a request with no CSRF token;
+- **every staff-only route refuses a requester** — found by reading which
+  `require_*` each handler calls, not from a list kept by hand;
+- **no handler acts before its permission check** — the guards are called in
+  the body rather than declared as dependencies, so "guarded" and "guarded
+  first" are separate questions and only the first is visible in a listing;
+- **no page a requester can reach links to one they cannot** — it follows
+  every link and form action on those pages.
 
-Both will fail on a newly added route that skips a guard. That is the point —
+They will fail on a newly added route that skips a guard. That is the point —
 fix the route, not the test.
+
+`_walk_routes` is what makes the first two mean anything, and it has been
+wrong before. FastAPI wraps each `include_router` in a `_IncludedRouter` that
+has no `.path` **and no `.routes`** — the real ones hang off
+`.original_router`. Reading `.routes` with a `[]` default walked past all
+seventy-eight router routes and left both tests asserting over the dozen
+declared on `app` itself, which is to say passing vacuously.
+`test_the_route_walk_actually_finds_the_routes` now fails if the walk stops
+seeing the application. **A test that enumerates is only as good as its
+enumeration**; if you touch the traversal, check the count.
+
+### Roles reach into the templates
+
+`require_staff` on the route is half of it. A page a requester can open must
+not *render* what it will then refuse:
+
+- **The route withholds the data, the template hides the control.** Both, not
+  either. `routes_items.item_detail` sends `people`, `open_loans`,
+  `past_loans`, `units` and the hold machinery only to staff — it once sent
+  them to everyone, so `item_detail.html` handed every signed-in student the
+  borrower datalist, which is every email address the stockroom holds.
+  `routes_requests.request_detail` withholds `overlaps` the same way.
+- **Borrower identity is staff-only.** The public page omits it unless
+  `config.PUBLIC_SHOW_BORROWERS` says otherwise; being signed in as a
+  requester is not a reason to be laxer than the page on the corridor wall.
+- **A control that 403s is a bug, not a defence.** The route refusing it is
+  correct and the button being there is still wrong.
 
 Other things that are load-bearing:
 
@@ -159,7 +193,7 @@ The phase 2 and phase 3 additions are listed below; the short version is that
 ## Testing
 
 ```bash
-.venv/bin/pytest              # 743 tests, ~2min
+.venv/bin/pytest              # 753 tests, ~5min
 ```
 
 `tests/test_web.py` drives real HTTP requests through the actual routes and

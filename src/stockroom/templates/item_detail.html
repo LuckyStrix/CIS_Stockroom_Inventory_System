@@ -3,15 +3,27 @@
 {% block title %}{{ item.name }}{% endblock %}
 {% block content %}
 
+{# Two audiences. A requester browses this page to decide what to ask for, so
+   they get the shelf: what it is, how many are free, what it looks like.
+   Everything that edits the item or names a person is staff-only, and the
+   route withholds that data rather than trusting this file to hide it -- see
+   routes_items.item_detail. Keep both halves in step: a control added here
+   without its guard is a button that 403s, and one added without the route
+   passing its data is a template error. #}
+
 <div class="headrow">
   <div>
     <h1>{{ item.name }} {{ status_pill(item) }}</h1>
     <p class="lede">{{ item.description or "No description." }}</p>
   </div>
   <div class="actions">
-    <a class="btn secondary" href="/items/{{ item.id }}/edit">Edit</a>
-    {% if item.barcode %}<a class="btn secondary" href="/labels?ids={{ item.id }}">Label</a>{% endif %}
-    <a class="btn secondary" href="/history?item_id={{ item.id }}">History</a>
+    {% if account.is_staff %}
+      <a class="btn secondary" href="/items/{{ item.id }}/edit">Edit</a>
+      {% if item.barcode %}<a class="btn secondary" href="/labels?ids={{ item.id }}">Label</a>{% endif %}
+      <a class="btn secondary" href="/history?item_id={{ item.id }}">History</a>
+    {% elif not item.is_archived %}
+      <a class="btn" href="/requests/new/borrow?item_id={{ item.id }}">Request to borrow</a>
+    {% endif %}
   </div>
 </div>
 
@@ -34,14 +46,14 @@
       <dt>Barcode</dt>
       <dd>
         {% if item.barcode %}<span class="mono">{{ item.barcode }}</span>
-        {% else %}
+        {% elif account.is_staff %}
           <form method="post" action="/items/{{ item.id }}/barcode" class="inline">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <button class="btn small secondary">Assign a barcode</button>
           </form>
-        {% endif %}
+        {% else %}<span class="muted">—</span>{% endif %}
       </dd>
-      {% if item.min_quantity is not none %}
+      {% if account.is_staff and item.min_quantity is not none %}
       <dt>Low-stock at</dt><dd>{{ item.min_quantity }}</dd>
       {% endif %}
       {% if item.product_url %}
@@ -55,6 +67,7 @@
     <div class="barcode-cell mt">{{ barcode_svg|safe }}</div>
     {% endif %}
 
+    {% if account.is_staff %}
     <div class="actions mt">
       {% if item.is_archived %}
         <form method="post" action="/items/{{ item.id }}/restore">
@@ -67,8 +80,10 @@
           <button class="btn secondary">Archive</button></form>
       {% endif %}
     </div>
+    {% endif %}
   </div>
 
+  {% if account.is_staff %}
   <div class="card">
     <h2>Check out</h2>
     {% if item.is_archived %}
@@ -124,6 +139,30 @@
     </form>
     {% endif %}
   </div>
+  {% else %}
+  <div class="card">
+    <h2>Need one?</h2>
+    {% if item.is_archived %}
+      <p class="muted flush">The stockroom no longer keeps this item.</p>
+    {% elif item.available > 0 %}
+      <p class="lede">
+        {{ item.available }} of {{ item.quantity }} on the shelf right now.
+        Asking does not reserve it — staff hand it over at the counter.
+      </p>
+      <div class="actions">
+        <a class="btn" href="/requests/new/borrow?item_id={{ item.id }}">Request to borrow</a>
+      </div>
+    {% else %}
+      <p class="lede">
+        None are on the shelf at the moment. You can still ask — staff will
+        see the request when one comes back.
+      </p>
+      <div class="actions">
+        <a class="btn secondary" href="/requests/new/borrow?item_id={{ item.id }}">Ask anyway</a>
+      </div>
+    {% endif %}
+  </div>
+  {% endif %}
 </div>
 
 <h2>Photos</h2>
@@ -137,6 +176,7 @@
              width="{{ photo.width }}" height="{{ photo.height }}">
         <figcaption>
           {% if photo.caption %}{{ photo.caption }}{% endif %}
+          {% if account.is_staff %}
           <span class="actions">
             {% if not photo.is_primary %}
             <form method="post" action="/photos/{{ photo.id }}/primary" class="inline">
@@ -150,18 +190,22 @@
               <button class="linkbutton">Remove</button>
             </form>
           </span>
+          {% endif %}
         </figcaption>
       </figure>
       {% endfor %}
     </div>
-    {% else %}
+    {% elif account.is_staff %}
     <p class="muted flush">
       No photos yet. “Is this the right cable?” is a photo question — a
       picture of the connector answers it better than any description.
     </p>
+    {% else %}
+    <p class="muted flush">No photos of this one yet.</p>
     {% endif %}
   </div>
 
+  {% if account.is_staff %}
   <div class="card">
     <h2>Add a photo</h2>
     {# _csrf must be the FIRST field: the CSRF middleware scans only the head
@@ -185,7 +229,13 @@
       <button class="btn">Upload</button>
     </form>
   </div>
+  {% endif %}
 </div>
+
+{# Everything below names a person -- who broke it, who has it, who had it --
+   or edits the stockroom's records. Staff only, and the route sends none of
+   it to anybody else. #}
+{% if account.is_staff %}
 
 {% if kits_using %}
 <div class="card">
@@ -388,5 +438,7 @@
 </table>
 {% else %}<div class="empty">This item has never been returned yet.</div>{% endif %}
 </div>
+
+{% endif %}
 
 {% endblock %}
