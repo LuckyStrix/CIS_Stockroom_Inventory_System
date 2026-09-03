@@ -249,7 +249,14 @@ fi
 
       "$APP_DIR/.venv/bin/pip" install -q -e "$APP_DIR[sso]"
 
-      install -d -m 0755 /etc/stockroom
+      # Owned by the service account, because `sso init` runs AS the service
+      # account and writes the keypair here. A root-owned 0755 directory --
+      # which is what `install -d` gives you if you do not say otherwise --
+      # made openssl fail with "Permission denied", and the failure was
+      # invisible: the `|| { ... }` below turned it into "not ready yet", the
+      # chmod afterwards was `|| true`, and single sign-on silently never got
+      # set up on a fresh Pi. 0750, because the private key lives here.
+      install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 /etc/stockroom
       # Generates the SAML keypair and caches RIT's metadata. Never
       # overwrites an existing key: doing so would silently invalidate a
       # registration ITS have already accepted.
@@ -259,6 +266,8 @@ fi
           echo "  start; see docs/its-registration.md." >&2
       }
       # The private key is read by the service, not by everyone on the Pi.
+      # `stockroom sso init` already creates it 0640; this is belt and braces
+      # for a key restored from a backup or copied in by hand.
       chgrp "$SERVICE_USER" /etc/stockroom/sp.key 2>/dev/null || true
       chmod 0640 /etc/stockroom/sp.key 2>/dev/null || true
   fi

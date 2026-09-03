@@ -55,7 +55,7 @@ and `X-Forwarded-For`.
 | **Signup** | Self-service, but the account is `pending` and **cannot sign in** until staff approve it. |
 | **Passwords** | `hashlib.scrypt`, memory-hard, parameters stored per hash so they can be raised later. Minimum 12 characters; common passwords and passwords built from your own name are refused. |
 | **Sessions** | Server-side and revocable. A 256-bit random token in the cookie; only its SHA-256 is stored. |
-| **Cookie** | `__Host-` prefixed under TLS: `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, no `Domain`. |
+| **Cookie** | `__Host-` prefixed under TLS: `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, no `Domain`. Cleared with those same attributes — a `__Host-` deletion without `Secure` is refused by the browser and leaves the cookie in place. |
 | **Timeouts** | 8 hours idle (slides), 7 days absolute (never extends). |
 | **Lockout** | 5 failures per address in 15 minutes; a separate per-IP ceiling (20 in 15 minutes) stops spraying. Stored in the database, so restarting the service does **not** reset it. |
 
@@ -106,6 +106,16 @@ application never sees a password. Full detail in
   browser is still signed in to RIT. On the shared counter machine this is a
   real residual risk; the mitigations are a short
   `STOCKROOM_SESSION_IDLE_HOURS` and closing the browser.
+- **A successful sign-in answers with a page, not a redirect.** The session
+  cookie is `SameSite=Strict`, and a Strict cookie is withheld from every hop
+  of a redirect chain that began cross-site — which RIT's form POST to
+  `/sso/acs` is. The landing page ends the chain on our own origin so the
+  cookie travels. Turning it back into a redirect breaks sign-in in a way no
+  test client can see; see [sso-integration.md](sso-integration.md).
+- **A `staff` or `admin` account is not linked to RIT automatically.** Email
+  matching provisions a requester; it does not confer an existing role, since
+  addresses get reissued and `uid` does not. `stockroom user link-sso` does it
+  deliberately, from a shell, and is audited.
 - **SHA-1 is refused by default.** `STOCKROOM_SSO_REJECT_SHA1="0"` accepts
   assertions signed with RSA-SHA1, and exists only because RIT's identity
   provider is old enough that it might still sign that way — see

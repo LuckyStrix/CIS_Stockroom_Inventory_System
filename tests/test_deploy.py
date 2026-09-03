@@ -315,6 +315,26 @@ def test_the_installer_parser_executes_nothing(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_the_sso_directory_is_writable_by_the_account_that_writes_to_it():
+    """A real failure, and a silent one.
+
+    setup-pi.sh runs `stockroom sso init` as the service account, and that
+    command shells out to openssl to write /etc/stockroom/sp.key. The
+    directory was created root-owned 0755, so openssl said "Permission
+    denied" -- and nothing said so out loud: the `|| { ... }` turned it into
+    "not ready yet" and the chmod that followed was `|| true`. Single sign-on
+    silently never got set up on a fresh Pi.
+
+    0750 rather than 0755 because the SAML private key lives in there.
+    """
+    body = (_DEPLOY / "setup-pi.sh").read_text()
+    match = re.search(r"install -d [^\n]*/etc/stockroom\b", body)
+    assert match, "setup-pi.sh no longer creates /etc/stockroom"
+    line = match.group(0)
+    assert '-o "$SERVICE_USER"' in line, line
+    assert "-m 0750" in line, line
+
+
 def test_every_documented_variable_is_one_the_app_reads():
     """A typo here is invisible: the setting simply never takes effect.
 

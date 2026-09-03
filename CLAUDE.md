@@ -278,7 +278,21 @@ because `sp_metadata()` overrides the flag for that document alone. The
 toolkit conflates the two and its default publishes no encryption key at all,
 which would have told RIT we cannot decrypt.
 
-`accounts.sso_login` is the one new audited mutation. python3-saml is an
+**`/sso/acs` answers with a page, not a redirect.** The session cookie is
+`SameSite=Strict`, so it is withheld from every hop of a redirect chain that
+began cross-site — which RIT's form POST is. `sso_landing.html` ends the chain
+on our own origin, and its meta refresh (not script: no `unsafe-inline`, and
+the browser has not seen our nonce) carries the cookie. No test client
+implements SameSite, so only a person in a browser would find this again.
+
+**A `staff` or `admin` account is never auto-linked to RIT.** `sso_login`
+falls back from `uid` to `mail` on first contact, which is right for
+provisioning and wrong for inheriting authority, because RIT reissue
+addresses. `accounts.link_sso`, via `stockroom user link-sso`, is the
+deliberate shell-only step — the same reasoning as the first administrator.
+
+`accounts.sso_login` and `accounts.link_sso` are the new audited mutations.
+python3-saml is an
 optional extra (`pip install -e '.[sso]'`), imported lazily, so the
 application starts and the suite runs without it.
 

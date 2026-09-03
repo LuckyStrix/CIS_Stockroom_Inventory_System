@@ -128,6 +128,21 @@ def finish(client: TestClient, idp_key, request_id, relay, **kwargs):
     )
 
 
+def landed_at(response) -> str:
+    """Where a successful /sso/acs sends the browser next.
+
+    Not a Location header: a successful sign-in answers with a page on our own
+    origin, because a redirect out of a cross-site POST does not carry a
+    SameSite=Strict cookie. See routes_sso.assertion_consumer.
+    """
+    assert response.status_code == 200, response.text[:300]
+    match = re.search(
+        r'<meta http-equiv="refresh" content="0; url=([^"]+)">', response.text
+    )
+    assert match, response.text[:400]
+    return match.group(1)
+
+
 # ---------------------------------------------------------------------------
 # the exemption, and what stands in for it
 # ---------------------------------------------------------------------------
@@ -177,7 +192,7 @@ def test_a_replayed_assertion_is_refused(client, idp, conn):
     """An assertion is good exactly once, even in the browser that earned it."""
     request_id, relay = start(client)
     first = finish(client, idp, request_id, relay)
-    assert first.status_code == 303
+    assert first.status_code == 200
 
     second = finish(client, idp, request_id, relay)
     assert second.status_code == 403
@@ -253,8 +268,7 @@ def test_a_valid_assertion_signs_someone_in(client, idp, conn):
     request_id, relay = start(client, "/items")
     response = finish(client, idp, request_id, relay)
 
-    assert response.status_code == 303
-    assert response.headers["location"].startswith("/items")
+    assert landed_at(response).startswith("/items")
     assert "stockroom_session" in client.cookies
 
     account = accounts.find_by_email(conn, "abc1234@rit.edu")
@@ -328,13 +342,39 @@ def test_a_second_sign_in_reuses_the_account(client, idp, conn):
         # is why this is a fresh visit rather than a second click.
         client.cookies.clear()
         request_id, relay = start(client)
-        assert finish(client, idp, request_id, relay).status_code == 303
+        assert finish(client, idp, request_id, relay).status_code == 200
     assert conn.execute("SELECT COUNT(*) n FROM account").fetchone()["n"] == 1
     assert conn.execute("SELECT COUNT(*) n FROM session").fetchone()["n"] == 2
 
 
-def test_an_existing_password_account_keeps_its_role_and_history(client, idp, conn):
+def test_an_existing_requester_keeps_its_history(client, idp, conn):
     """The migration property: nobody re-registers, nobody loses anything."""
+    existing = accounts.register(
+        conn, first_name="Ada", last_name="Byron", email="abc1234@rit.edu",
+        password="glass onion tuesday lamp", role="requester", status="active",
+        actor=SETUP,
+    )
+
+    request_id, relay = start(client)
+    landed_at(finish(client, idp, request_id, relay))
+
+    linked = accounts.find_by_email(conn, "abc1234@rit.edu")
+    assert linked.id == existing.id
+    assert linked.sso_uid == "abc1234"
+    # It still has its password: this account can use either door until the
+    # stockroom decides to close one.
+    assert linked.can_use_password
+
+
+def test_a_staff_account_is_not_adopted_on_an_email_match(client, idp, conn):
+    """The one way this flow could hand out real authority by accident.
+
+    An email match is enough to provision, and not enough to inherit a role
+    that can write equipment off: RIT reissue addresses after people leave,
+    which is exactly why `uid` and not `mail` is the primary key here. So a
+    staff or admin account is linked by a human, from a shell, and until then
+    RIT sign-in refuses it rather than adopting it.
+    """
     existing = accounts.register(
         conn, first_name="Ada", last_name="Byron", email="abc1234@rit.edu",
         password="glass onion tuesday lamp", role="staff", status="active",
@@ -342,15 +382,66 @@ def test_an_existing_password_account_keeps_its_role_and_history(client, idp, co
     )
 
     request_id, relay = start(client)
-    assert finish(client, idp, request_id, relay).status_code == 303
+    response = finish(client, idp, request_id, relay)
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/login?error=")
+    assert "stockroom_session" not in response.cookies
+
+    unchanged = accounts.get_account(conn, existing.id)
+    assert unchanged.sso_uid is None
+    assert unchanged.role == "staff"
+    # And no shadow account was made instead.
+    assert conn.execute(
+        "SELECT COUNT(*) n FROM account WHERE email = ?", ("abc1234@rit.edu",)
+    ).fetchone()["n"] == 1
+
+
+def test_a_linked_staff_account_signs_in_and_keeps_its_role(client, idp, conn):
+    """What `stockroom user link-sso` buys: the same migration, deliberately."""
+    existing = accounts.register(
+        conn, first_name="Ada", last_name="Byron", email="abc1234@rit.edu",
+        password="glass onion tuesday lamp", role="staff", status="active",
+        actor=SETUP,
+    )
+    accounts.link_sso(
+        conn, actor=SETUP, account_id=existing.id, sso_uid="abc1234"
+    )
+
+    request_id, relay = start(client)
+    landed_at(finish(client, idp, request_id, relay))
 
     linked = accounts.find_by_email(conn, "abc1234@rit.edu")
     assert linked.id == existing.id
     assert linked.role == "staff"
     assert linked.sso_uid == "abc1234"
-    # It still has its password: this account can use either door until the
-    # stockroom decides to close one.
     assert linked.can_use_password
+
+
+def test_a_uid_cannot_be_linked_to_two_accounts(conn):
+    """The unique index says so; link_sso says so first, and in English."""
+    from stockroom.service import ConflictError
+
+    first = accounts.register(
+        conn, first_name="Ada", last_name="Byron", email="abc1234@rit.edu",
+        password="glass onion tuesday lamp", role="staff", status="active",
+        actor=SETUP,
+    )
+    second = accounts.register(
+        conn, first_name="Grace", last_name="Hopper", email="ghz9999@rit.edu",
+        password="glass onion tuesday lamp", role="staff", status="active",
+        actor=SETUP,
+    )
+    accounts.link_sso(conn, actor=SETUP, account_id=first.id, sso_uid="abc1234")
+
+    with pytest.raises(ConflictError):
+        accounts.link_sso(
+            conn, actor=SETUP, account_id=second.id, sso_uid="abc1234"
+        )
+    with pytest.raises(ConflictError):
+        accounts.link_sso(
+            conn, actor=SETUP, account_id=first.id, sso_uid="somebodyelse"
+        )
 
 
 def test_an_sso_account_cannot_be_signed_into_with_a_password(client, idp, conn):
@@ -508,8 +599,23 @@ def test_offering_the_key_does_not_start_refusing_cleartext(client, idp, conn):
     assert saml.settings_dict()["security"]["wantAssertionsEncrypted"] is False
 
     request_id, relay = start(client)
-    response = finish(client, idp, request_id, relay)
-    assert response.status_code == 303, response.text[:300]
+    assert landed_at(finish(client, idp, request_id, relay)).startswith("/")
+
+
+def test_the_metadata_never_expires(idp):
+    """The document ITS register is a static file, and must not have a date.
+
+    python3-saml stamps validUntil two days out by default. The ITS request
+    form says to attach the metadata when they cannot fetch the URL, and this
+    host is firewalled to campus, so attaching it is the expected case -- and
+    a document that expires on Thursday takes every sign-in with it, with an
+    error at the far end that says nothing about a date. RIT's own template
+    carries no validUntil either.
+    """
+    body = saml.sp_metadata()
+    assert "validUntil" not in body
+    # cacheDuration stays: a provider that CAN fetch the URL still refreshes.
+    assert "cacheDuration" in body
 
 
 def test_the_metadata_is_rate_limited(client, idp, monkeypatch):
@@ -548,8 +654,7 @@ def test_sha1_can_be_accepted_when_rits_identity_provider_needs_it(
     """
     monkeypatch.setattr(config, "SSO_REJECT_SHA1", False)
     request_id, relay = start(client)
-    response = finish(client, idp, request_id, relay, digest="sha1")
-    assert response.status_code == 303, response.text[:300]
+    landed_at(finish(client, idp, request_id, relay, digest="sha1"))
     assert accounts.find_by_email(conn, "abc1234@rit.edu") is not None
 
 
@@ -630,3 +735,107 @@ def test_the_public_paths_do_not_match_a_longer_word():
     assert deps.is_public_path("/sso/acs")
     assert not deps.is_public_path("/sso/admin")
     assert not deps.is_public_path("/ssofoo")
+
+
+# ---------------------------------------------------------------------------
+# getting the session cookie home
+# ---------------------------------------------------------------------------
+
+
+def test_a_successful_sign_in_answers_with_a_page_not_a_redirect(client, idp):
+    """The SameSite=Strict problem, and the shape of the fix.
+
+    A Strict cookie is withheld from any navigation a cross-site page
+    initiated, including every hop of a redirect chain that began cross-site
+    -- which is what RIT's form POST to /sso/acs is. Redirecting from here
+    therefore delivered the browser to a page WITHOUT the session cookie just
+    set: a loop under AUTH_MODE="sso", and the password form under "both".
+
+    Serving a page on our own origin ends the cross-site chain, so the meta
+    refresh out of it is same-site and carries the cookie. No test client
+    implements SameSite, so what is asserted here is the mechanism: a 200 from
+    our origin carrying the cookie, and no Location for a browser to follow
+    while still inside RIT's navigation.
+    """
+    request_id, relay = start(client, "/items")
+    response = finish(client, idp, request_id, relay)
+
+    assert response.status_code == 200
+    assert "location" not in response.headers
+    assert any(
+        "stockroom_session=" in header
+        for header in response.headers.get_list("set-cookie")
+    )
+    assert landed_at(response).startswith("/items")
+
+
+def test_the_landing_page_carries_the_flash_a_redirect_would_have(client, idp):
+    """Signing in still says so, even though nothing redirects any more."""
+    request_id, relay = start(client)
+    target = landed_at(finish(client, idp, request_id, relay))
+    assert "ok=Signed%20in%20as%20Ada%20Byron." in target
+
+
+def test_the_landing_page_needs_no_javascript(client, idp):
+    """The CSP has no 'unsafe-inline' and the browser has not seen our nonce.
+
+    A sign-in that completes only with JavaScript enabled is a sign-in that
+    fails silently without it, on the one page where the person cannot tell
+    what went wrong.
+    """
+    request_id, relay = start(client)
+    body = finish(client, idp, request_id, relay).text
+    assert "<script" not in body
+    assert 'http-equiv="refresh"' in body
+
+
+def test_the_landing_target_still_goes_through_safe_path(client, idp):
+    """It is a URL handed to a browser, so it is a redirect in all but name."""
+    request_id, relay = start(client, "https://evil.invalid/steal")
+    assert landed_at(finish(client, idp, request_id, relay)).startswith("/?")
+
+
+# ---------------------------------------------------------------------------
+# how RIT might spell an attribute
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("uid_name, mail_name", [
+    ("uid", "mail"),
+    ("urn:oid:0.9.2342.19200300.100.1.1", "urn:oid:0.9.2342.19200300.100.1.3"),
+    ("0.9.2342.19200300.100.1.1", "0.9.2342.19200300.100.1.3"),
+    ("urn:mace:dir:attribute-def:uid", "urn:mace:dir:attribute-def:mail"),
+])
+def test_every_spelling_rit_might_use_is_read(client, idp, conn, uid_name,
+                                              mail_name):
+    """The toolkit keys attributes by `Name`, so a spelling we do not list is
+    silently dropped -- and a dropped uid or mail is a refused sign-in.
+
+    The bare OID is the form RIT's own cookbook uses; the urn:mace form is the
+    one a SAML 1.1-era release policy carries, and rit-metadata.xml still
+    advertises SAML 1.1.
+    """
+    request_id, relay = start(client)
+    landed_at(finish(client, idp, request_id, relay, attributes={
+        uid_name: ["abc1234"],
+        mail_name: ["abc1234@rit.edu"],
+    }))
+    account = accounts.find_by_email(conn, "abc1234@rit.edu")
+    assert account is not None and account.sso_uid == "abc1234"
+
+
+def test_an_attribute_we_cannot_place_is_logged_not_swallowed(client, idp, caplog):
+    """Otherwise a mis-spelled release is indistinguishable from no release.
+
+    Names only. The values are personal data and are never logged.
+    """
+    request_id, relay = start(client)
+    with caplog.at_level("INFO", logger="stockroom.saml"):
+        finish(client, idp, request_id, relay, attributes={
+            "uid": ["abc1234"],
+            "mail": ["abc1234@rit.edu"],
+            "ritEduSomethingNew": ["a value nobody should log"],
+        })
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "ritEduSomethingNew" in messages
+    assert "a value nobody should log" not in messages

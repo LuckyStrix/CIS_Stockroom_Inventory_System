@@ -639,6 +639,67 @@ def login(
     return LoginResult(token=token, account=get_account(conn, account.id))
 
 
+def link_sso(
+    conn: sqlite3.Connection, *, actor: Actor, account_id: int, sso_uid: str
+) -> Account:
+    """Attach an RIT identity to an existing account, on purpose.
+
+    `sso_login` links a plain `requester` by email on its own, because there
+    is nothing there to take: the worst case is somebody borrowing under
+    somebody else's name, and RIT vouched for the address. It will not do that
+    for a `staff` or `admin` account, and this is what does it instead.
+
+    The difference is what an email match is worth. `uid` is stable; an
+    address is a label, and RIT reissue addresses after people leave. Matching
+    on one is fine for provisioning and wrong for inheriting a role that can
+    write off equipment -- so promoting an identity into a privileged account
+    is a decision a human makes, from a shell on the Pi, exactly as making the
+    first administrator is.
+
+    Callable before anybody signs in, which is the intended use: link the
+    handful of staff accounts the week before the migration term starts.
+    """
+    sso_uid = (sso_uid or "").strip()
+    if not sso_uid:
+        raise ValidationError("An RIT uid is required.")
+
+    with db.transaction(conn):
+        account = get_account(conn, account_id)
+
+        if account.sso_uid == sso_uid:
+            return account
+        if account.sso_uid:
+            raise ConflictError(
+                f"{account.email} is already linked to RIT uid "
+                f"{account.sso_uid!r}. Unlinking is not supported; make a new "
+                "account if the person has changed."
+            )
+
+        clash = _find_by_sso_uid(conn, sso_uid)
+        if clash is not None:
+            raise ConflictError(
+                f"RIT uid {sso_uid!r} is already linked to {clash.email}."
+            )
+
+        conn.execute(
+            "UPDATE account SET sso_uid = ?, updated_at = ? WHERE id = ?",
+            (sso_uid, db.utcnow(), account_id),
+        )
+        log_event(
+            conn,
+            actor=actor,
+            action="account.sso_link",
+            entity_type="account",
+            entity_id=account_id,
+            summary=(
+                f"Linked {account.email} ({account.role}) to RIT single "
+                f"sign-on as {sso_uid}"
+            ),
+            changes={"sso_uid": {"from": account.sso_uid, "to": sso_uid}},
+        )
+    return get_account(conn, account_id)
+
+
 def _find_by_sso_uid(conn: sqlite3.Connection, sso_uid: str) -> Account | None:
     row = conn.execute(
         "SELECT * FROM account WHERE sso_uid = ?", (sso_uid,)
@@ -697,6 +758,23 @@ def sso_login(
                 # Two RIT identities claiming one address. Never guess.
                 raise ConflictError(
                     f"{email} is already linked to a different RIT account."
+                )
+            if by_email is not None and by_email.role != "requester":
+                # An email match is not enough to inherit `staff` or `admin`.
+                # Addresses get reissued after people leave; `uid` does not,
+                # which is why it is the primary key here. Silently adopting a
+                # privileged account on a name collision is the one way this
+                # flow could hand out real authority by accident, so it does
+                # not: `link_sso` exists to do it deliberately.
+                #
+                # Raised inside the transaction, so nothing is written. The
+                # person is told what to ask for, because they are a real
+                # member of staff standing at the counter and "no" with no
+                # instructions is useless.
+                raise ConflictError(
+                    f"{email} is a {by_email.role} account and will not be "
+                    "linked to RIT sign-in automatically. Ask an "
+                    "administrator to run `stockroom user link-sso` for it."
                 )
             account = by_email
 

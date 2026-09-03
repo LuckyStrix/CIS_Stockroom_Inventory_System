@@ -180,8 +180,24 @@ Requested from ITS, and what each is for:
 | `ritEduAffiliation` | stored in `account.affiliation`; **not** used for roles |
 | `ritEduMemberOfUid` | parsed, currently unused; requested so group-driven roles stay possible without a second ticket |
 
-A Shibboleth IdP may send these under friendly names or as OID URNs depending
-on the release policy, so `saml._ATTRIBUTES` accepts either.
+`saml._ATTRIBUTES` lists **four** spellings of each, because the toolkit keys
+`get_attributes()` by the assertion's `Name` and not its `FriendlyName`, so
+one this application does not list is silently dropped — and a dropped `uid`
+or `mail` is a refused sign-in:
+
+| Spelling | Where it comes from |
+|---|---|
+| `uid` | basic NameFormat, or a policy that puts the friendly name in `Name` |
+| `urn:oid:0.9.2342.19200300.100.1.1` | uri NameFormat, the modern default |
+| `0.9.2342.19200300.100.1.1` | the bare form RIT's own cookbook names |
+| `urn:mace:dir:attribute-def:uid` | SAML 1.1 era — and `rit-metadata.xml` still advertises SAML 1.1 |
+
+`ritEduAffiliation` and `ritEduMemberOfUid` have no registered OID, so their
+fallbacks are a guess at what ITS might release instead. Neither drives any
+decision, so guessing wrong costs a blank column — and `saml._log_attribute_names`
+logs, at INFO, every released attribute this application could not place, so a
+wrong guess is visible rather than silent. Names only: the values are personal
+data and are never logged.
 
 **Attributes only arrive when somebody authenticates.** RIT are explicit that
 SAML is not a queryable directory, so there is no way to look up a person who
@@ -227,6 +243,63 @@ as it is off, and question 1 of the ITS ticket is there to make sure it never
 has to be. Nothing in the test suite can catch this in production's favour —
 `tests/fixtures/saml_idp.py` signs whichever way the test asks, and both
 positions are tested, but only RIT can say which one they are.
+
+## Getting the session cookie home
+
+`/sso/acs` answers a successful sign-in with a **page**, not a redirect, and
+that is not a stylistic choice.
+
+The session cookie is `SameSite=Strict`. A Strict cookie is withheld from any
+navigation that a cross-site page initiated — and that includes every hop of a
+redirect chain that began cross-site. RIT's identity provider finishes by
+POSTing a form to `/sso/acs` from its own origin, so a `303` out of that
+handler delivers the browser to a page **without** the cookie the handler just
+set. Under `AUTH_MODE="sso"` that is a loop: landing signed-out sends the
+browser to `/sso/login`, RIT still recognises it, and round it goes. Under
+`both` it is merely baffling — the password form, immediately after signing
+in with RIT.
+
+Serving `sso_landing.html` from our own origin ends the cross-site chain. The
+`<meta http-equiv="refresh">` in it is a navigation *that page* initiates, so
+it is same-site and carries the Strict cookie. Setting the cookie on the
+cross-site response is fine: SameSite governs when a cookie is **sent**, never
+when it may be set.
+
+The alternative was to make the session cookie `Lax`, which would also have
+worked and would have loosened a property the whole application relies on, in
+every mode, for the sake of one route. Two things follow for anyone editing
+this:
+
+- **Do not turn the landing page back into a redirect.** The test named
+  `test_a_successful_sign_in_answers_with_a_page_not_a_redirect` exists to
+  say so, and no test client implements SameSite, so nothing else will catch
+  it — it will be caught by a person in a browser, during a migration term.
+- **It cannot use JavaScript.** The CSP has no `unsafe-inline` and this page
+  reaches a browser that has never seen our nonce; a sign-in that completes
+  only with scripting is one that fails silently without it.
+
+## Linking an account that already has authority
+
+`sso_login` matches `uid` first and falls back to `mail` exactly once, on
+first contact, so an existing account keeps its history instead of everybody
+re-registering. That fallback is deliberately **not** applied to a `staff` or
+`admin` account.
+
+An email match is enough to provision a new requester. It is not enough to
+inherit a role that can write equipment off, because RIT reissue addresses
+after people leave — which is the whole reason `uid` and not `mail` is the
+primary key here. So a privileged account is linked deliberately, from a
+shell:
+
+```bash
+sudo -u stockroom stockroom user link-sso alice@rit.edu abc1234
+```
+
+`accounts.link_sso` is audited like any other mutation, refuses a `uid`
+already attached to somebody else, and refuses to move an account that is
+already linked. Until it is run, that person's RIT sign-in is refused with a
+message telling them what to ask for — which is better than either silently
+adopting the account or silently making a second one.
 
 ## Roles
 

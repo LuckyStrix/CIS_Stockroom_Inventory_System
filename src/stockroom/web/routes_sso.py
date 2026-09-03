@@ -5,6 +5,7 @@ anyone to be signed in as:
 
     GET  /sso/login       start: build an AuthnRequest, send the browser to RIT
     POST /sso/acs         finish: validate what RIT sent back, open a session
+                          (answers with a page, not a redirect -- see below)
     GET  /sso/metadata    our own metadata, which ITS need to register us
     GET  /sso/signed-out  where signing out lands, and why it says what it says
 
@@ -21,6 +22,7 @@ is untouched, and so is every route, every service module and the audit log.
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, Response
@@ -38,6 +40,7 @@ from .deps import (
     safe_path,
     set_saml_state_cookie,
     set_session_cookie,
+    templates,
 )
 
 router = APIRouter()
@@ -55,6 +58,17 @@ _start_throttle = security.RateLimiter(limit=30, per_seconds=60)
 # fetch this occasionally and a person runs `stockroom sso metadata` by hand;
 # nothing legitimate needs it in a loop.
 _metadata_throttle = security.RateLimiter(limit=10, per_seconds=60)
+
+
+def _with_flash(path: str, message: str) -> str:
+    """The `?ok=` that `redirect()` would have added, for a page that cannot.
+
+    Kept identical to deps.redirect's construction on purpose: the landing
+    page hands the browser a URL, and the flash has to survive that hop the
+    same way it survives a redirect.
+    """
+    separator = "&" if "?" in path else "?"
+    return f"{path}{separator}ok={quote(message)}"
 
 
 def _unavailable() -> str:
@@ -158,8 +172,31 @@ def assertion_consumer(
         clear_saml_state_cookie(response, request)
         return response
 
-    response = redirect(
-        signin.return_to, ok=f"Signed in as {result.account.name}."
+    # A rendered page rather than a redirect, and this is the one thing in
+    # the SSO flow that is NOT obvious.
+    #
+    # The session cookie is SameSite=Strict. A Strict cookie is withheld from
+    # any navigation a cross-site page initiated -- and that includes every
+    # hop of a redirect chain that began cross-site, which is exactly what we
+    # are in the middle of: RIT's browser-side form POSTed here. So a 303 to
+    # `return_to` arrives WITHOUT the cookie we just set. Under
+    # AUTH_MODE="sso" that is a loop, because landing signed-out sends the
+    # browser back to /sso/login, RIT still recognises it, and round it goes;
+    # under "both" it merely dumps the person on the password form having
+    # just signed in.
+    #
+    # Serving a page on our own origin ends the cross-site chain. The meta
+    # refresh in it is a navigation THIS page initiates, so it is same-site,
+    # so the Strict cookie goes with it. Setting the cookie here is fine --
+    # SameSite governs when a cookie is sent, not when it may be set.
+    #
+    # The alternative was to make the session cookie Lax, which would have
+    # worked and would have loosened a property the whole application relies
+    # on, in every mode, for the sake of one route. Covered by
+    # test_the_landing_page_is_what_carries_a_strict_cookie_home.
+    target = _with_flash(signin.return_to, f"Signed in as {result.account.name}.")
+    response = templates.TemplateResponse(
+        request, "sso_landing.html", {"target": target}
     )
     set_session_cookie(response, request, result.token)
     clear_saml_state_cookie(response, request)

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{#
+  The one page in the application that exists for a cookie rather than for a
+  reader, so it deliberately does not extend base.html: base.html renders the
+  navigation from `account`, and the session this page just created cannot be
+  read back from the request that produced it.
+
+  A meta refresh rather than a redirect, and rather than JavaScript. See
+  routes_sso.assertion_consumer for why the redirect had to go. It cannot be
+  script, because the content security policy has no 'unsafe-inline' and this
+  page is served to a browser that has never seen our nonce -- and a sign-in
+  that needs JavaScript is a sign-in that fails silently with it turned off.
+#}
+<meta http-equiv="refresh" content="0; url={{ target }}">
+<title>Signing you in · CIS Stockroom</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="/static/favicon.svg">
+</head>
+<body>
+<main>
+  <div class="narrow">
+    <div class="card center">
+      <h1>Signed in</h1>
+      <p>RIT has confirmed who you are. Taking you to the stockroom&hellip;</p>
+      <p><a class="btn" href="{{ target }}">Continue</a></p>
+      <p class="muted small">If this page does not move on by itself, use the
+        button above.</p>
+    </div>
+  </div>
+</main>
+</body>
+</html>

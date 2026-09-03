@@ -374,12 +374,23 @@ def cmd_sso_init(args) -> int:
         # certificate. This key signs SAML, is published in our metadata, and
         # is trusted because ITS pin it at registration -- no certificate
         # authority is involved or wanted.
-        subprocess.run(
-            ["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
-             "-days", "1095", "-keyout", str(key), "-out", str(cert),
-             "-subj", f"/CN={host}/O=CIS Stockroom"],
-            check=True, capture_output=True,
-        )
+        try:
+            subprocess.run(
+                ["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+                 "-days", "1095", "-keyout", str(key), "-out", str(cert),
+                 "-subj", f"/CN={host}/O=CIS Stockroom"],
+                check=True, capture_output=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            # Says what openssl said. The failure this exists for is
+            # "Permission denied" writing into /etc/stockroom, which as a
+            # traceback reads like a Python problem and as openssl's own
+            # words reads like what it is.
+            detail = (exc.stderr or b"").decode("utf-8", "replace").strip()
+            print(f"openssl could not write the keypair into {cert.parent}:")
+            print(f"  {detail or exc}")
+            print(f"Check that {cert.parent} exists and is writable by this user.")
+            return 1
         key.chmod(0o640)
         print(f"Generated a SAML signing keypair for {host} in {cert.parent}.")
         print("  NOTE: it expires in 3 years. Rotating it means telling ITS.")
@@ -546,6 +557,26 @@ def cmd_user_role(args) -> int:
         conn, actor=_actor(args), account_id=account.id, role=args.role
     )
     print(f"{updated.name} is now {updated.role}.")
+    return 0
+
+
+def cmd_user_link_sso(args) -> int:
+    """Attach an RIT identity to a staff or admin account, deliberately.
+
+    A `requester` links itself on first RIT sign-in. A privileged account does
+    not, because an email match is not proof enough to inherit a role that can
+    write equipment off -- see accounts.link_sso. This is the shell-only step
+    that does it, and being shell-only is the point, the same way making the
+    first administrator is.
+    """
+    conn = _conn()
+    account = _find_account(conn, args.email)
+    linked = accounts.link_sso(
+        conn, actor=_actor(args), account_id=account.id, sso_uid=args.uid
+    )
+    print(f"{linked.name} <{linked.email}> ({linked.role}) is now RIT uid "
+          f"{linked.sso_uid}.")
+    print("They can sign in with RIT single sign-on from now on.")
     return 0
 
 
@@ -779,6 +810,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("email")
     p.add_argument("role", choices=accounts.ROLES)
     p.set_defaults(func=cmd_user_role)
+
+    p = user.add_parser(
+        "link-sso", help="attach an RIT uid to a staff or admin account"
+    )
+    p.add_argument("email")
+    p.add_argument("uid", help="RIT's `uid` attribute, e.g. abc1234")
+    p.set_defaults(func=cmd_user_link_sso)
 
     p = user.add_parser("disable", help="switch an account off")
     p.add_argument("email")

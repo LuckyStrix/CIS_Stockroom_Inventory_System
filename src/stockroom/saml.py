@@ -36,10 +36,13 @@ sign-on on.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 class SamlError(Exception):
@@ -70,23 +73,71 @@ class Assertion:
     session_index: str
 
 
-# Friendly name first, then the OID URN a Shibboleth IdP sends when the
-# release policy does not set a friendly name. Order matters only in that the
-# first one present wins.
+# What an attribute might be called on the wire. The toolkit keys
+# get_attributes() by the assertion's `Name`, not its `FriendlyName`, so every
+# spelling RIT's release policy might use has to be listed here or the value
+# is silently dropped -- and a dropped `uid` or `mail` is the difference
+# between signing in and not.
+#
+# Four spellings, in the order they are tried; the first one present wins:
+#
+#   the friendly name          `uid`     -- basic NameFormat, or a policy that
+#                                            sets FriendlyName as the Name
+#   the OID URN                `urn:oid:0.9.2342.19200300.100.1.1`
+#                                         -- uri NameFormat, the modern default
+#   the bare OID               `0.9.2342.19200300.100.1.1`
+#                                         -- the spelling RIT's own cookbook
+#                                            uses when it says attributes "may
+#                                            be mapped to an alias such as
+#                                            mail, uid, givenName or may use an
+#                                            oid such as 0.9.2342..."
+#   the SAML 1.1 URN           `urn:mace:dir:attribute-def:uid`
+#                                         -- not a guess: rit-metadata.xml
+#                                            still advertises
+#                                            urn:mace:shibboleth:1.0 and SAML
+#                                            1.1 endpoints, and that is the
+#                                            name a release policy of that
+#                                            vintage carries forward.
 _ATTRIBUTES = {
-    "uid": ("uid", "urn:oid:0.9.2342.19200300.100.1.1"),
-    "mail": ("mail", "urn:oid:0.9.2342.19200300.100.1.3"),
-    "givenName": ("givenName", "urn:oid:2.5.4.42"),
-    "sn": ("sn", "urn:oid:2.5.4.4"),
-    # RIT's own attributes have no registered OID; the eduPerson equivalents
-    # are listed as a fallback in case ITS release those instead.
+    "uid": (
+        "uid",
+        "urn:oid:0.9.2342.19200300.100.1.1",
+        "0.9.2342.19200300.100.1.1",
+        "urn:mace:dir:attribute-def:uid",
+    ),
+    "mail": (
+        "mail",
+        "urn:oid:0.9.2342.19200300.100.1.3",
+        "0.9.2342.19200300.100.1.3",
+        "urn:mace:dir:attribute-def:mail",
+    ),
+    "givenName": (
+        "givenName",
+        "urn:oid:2.5.4.42",
+        "2.5.4.42",
+        "urn:mace:dir:attribute-def:givenName",
+    ),
+    "sn": (
+        "sn",
+        "urn:oid:2.5.4.4",
+        "2.5.4.4",
+        "urn:mace:dir:attribute-def:sn",
+    ),
+    # RIT's own attributes have no registered OID, so there is nothing
+    # authoritative to fall back to -- the eduPerson equivalents are a guess
+    # at what ITS might release instead. Neither drives any decision here
+    # (see docs/sso-integration.md on roles), so guessing wrong costs a blank
+    # column and nothing else. _log_attribute_names is what makes a wrong
+    # guess visible rather than silent.
     "ritEduAffiliation": (
         "ritEduAffiliation",
+        "urn:mace:dir:attribute-def:ritEduAffiliation",
         "eduPersonAffiliation",
         "urn:oid:1.3.6.1.4.1.5923.1.1.1.1",
     ),
     "ritEduMemberOfUid": (
         "ritEduMemberOfUid",
+        "urn:mace:dir:attribute-def:ritEduMemberOfUid",
         "isMemberOf",
         "urn:oid:1.3.6.1.4.1.5923.1.5.1.1",
     ),
@@ -293,6 +344,19 @@ def settings_dict() -> dict:
             "signatureAlgorithm":
                 "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
             "digestAlgorithm": "http://www.w3.org/2001/04/xmlenc#sha256",
+            # No validUntil on our metadata. The toolkit's default stamps one
+            # two days out (OneLogin_Saml2_Metadata.TIME_VALID), which is
+            # wrong for how this gets registered: the ITS form says to attach
+            # the document when they cannot fetch the URL, and this host is
+            # firewalled to campus, so what ITS load is a static file. A file
+            # that expires on Thursday takes every sign-in with it, and the
+            # error at the far end says nothing about a date. RIT's own
+            # template in the request form carries no validUntil either.
+            #
+            # An empty string is how the toolkit is told to omit the
+            # attribute; None means "use the default". cacheDuration is left
+            # alone, so a provider that CAN fetch the URL still refreshes.
+            "metadataValidUntil": "",
             # Refuses RSA-SHA1 and SHA-1 digests on the way in. A switch
             # rather than a constant because RIT's IdP is old enough that it
             # might still sign that way -- see config.SSO_REJECT_SHA1, which
@@ -386,6 +450,30 @@ def _one(attributes: dict, key: str) -> str:
     return values[0].strip() if values else ""
 
 
+def _log_attribute_names(attributes: dict) -> None:
+    """Say what arrived and what we could not place. Names only, never values.
+
+    Without this, a release policy that spells an attribute a way
+    :data:`_ATTRIBUTES` does not list is invisible: the field is simply blank
+    and nobody knows whether ITS never released it or we failed to read it.
+    The names are not personal data; the values are, and are not logged.
+
+    Recognised names go to DEBUG because they are the normal case.
+    Unrecognised ones go to INFO once per sign-in, because they are the
+    evidence somebody needs to take to ITS -- or to add a spelling here.
+    """
+    received = set(attributes)
+    known = {name for spellings in _ATTRIBUTES.values() for name in spellings}
+    logger.debug("SSO: assertion carried attributes %s", sorted(received))
+    unplaced = sorted(received - known)
+    if unplaced:
+        logger.info(
+            "SSO: released attributes this application does not read: %s "
+            "(add the spelling to saml._ATTRIBUTES if one of them is wanted)",
+            unplaced,
+        )
+
+
 def parse_response(*, saml_response: str, request_id: str) -> Assertion:
     """Validate an assertion and return what it says. Raise otherwise.
 
@@ -414,6 +502,7 @@ def parse_response(*, saml_response: str, request_id: str) -> Assertion:
         raise SamlError("The identity provider did not authenticate this person.")
 
     attributes = auth.get_attributes() or {}
+    _log_attribute_names(attributes)
     uid = _one(attributes, "uid")
     email = _one(attributes, "mail")
     if not uid or not email:

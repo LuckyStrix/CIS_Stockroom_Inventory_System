@@ -189,10 +189,28 @@ single-file change if ISO would prefer that. Ask them which they want.
 
 ```bash
 sudo -u stockroom stockroom sso init --refresh   # fresh RIT metadata
+
+# Link the staff and admin accounts BEFORE anyone tries to sign in. RIT
+# sign-in provisions and links requesters on its own; it refuses to adopt a
+# privileged account on an email match, because addresses get reissued and a
+# role that can write equipment off is not something to inherit by
+# coincidence. `stockroom user list` shows who needs this; the uid is the part
+# of the RIT address before the @.
+sudo -u stockroom stockroom user list
+sudo -u stockroom stockroom user link-sso alice@rit.edu abc1234
+
 sudoedit /etc/stockroom.env                      # STOCKROOM_AUTH_MODE="both"
 sudo systemctl restart stockroom
 sudo -u stockroom stockroom sso check
+sudo -u stockroom stockroom doctor               # WARN here means read it
 ```
+
+Then **sign in once, in a real browser**, before telling anybody else. Two of
+the things that can go wrong at this point are invisible to the test suite:
+the identity provider's signature algorithm (question 1 above) and anything
+to do with cookies crossing back from RIT. What "working" looks like is a
+sign-in that lands you on a stockroom page already signed in — not on the
+sign-in page, and not going round in circles.
 
 Run `both` for a term so nobody is locked out, then `sso`. If anything goes
 wrong, set the mode back to `password` and restart — everyone with a password

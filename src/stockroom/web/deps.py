@@ -141,10 +141,28 @@ def set_session_cookie(response, request: Request, token: str) -> None:
     )
 
 
+# Deleting a cookie is setting one, so the deletion has to satisfy the same
+# rules the original did. A `__Host-` name is REFUSED by the browser unless
+# the Set-Cookie carries Secure and Path=/ -- and Starlette's delete_cookie
+# defaults to secure=False, so the deletion was being thrown away and the
+# cookie stayed in the jar. Nothing was left unrevoked (the session row is
+# deleted server-side either way), but "Sign out" did not remove the cookie
+# it said it removed.
+#
+# The plain names are deleted without Secure, because on plain HTTP a Secure
+# deletion is the one that gets ignored. So each name is cleared the way it
+# was set.
+def _delete_cookie(response, name: str, *, secure: bool, samesite: str) -> None:
+    response.delete_cookie(
+        name, path="/", secure=secure, httponly=True, samesite=samesite
+    )
+
+
 def clear_session_cookie(response, request: Request) -> None:
-    for name in (SESSION_COOKIE_SECURE, SESSION_COOKIE_PLAIN):
-        response.delete_cookie(name, path="/")
-    # Drop the anonymous token too, so the next sign-in starts clean.
+    _delete_cookie(response, SESSION_COOKIE_SECURE, secure=True, samesite="strict")
+    _delete_cookie(response, SESSION_COOKIE_PLAIN, secure=False, samesite="strict")
+    # Drop the anonymous token too, so the next sign-in starts clean. Not
+    # `__Host-` prefixed and not HttpOnly-critical, but cleared consistently.
     response.delete_cookie(CSRF_COOKIE, path="/")
 
 
@@ -201,8 +219,11 @@ def saml_state_token(request: Request) -> str:
 
 
 def clear_saml_state_cookie(response, request: Request) -> None:
-    for name in (SAML_STATE_COOKIE_SECURE, SAML_STATE_COOKIE_PLAIN):
-        response.delete_cookie(name, path="/")
+    # SameSite=None on the secure name, matching how it was set: None without
+    # Secure is refused outright, and a `__Host-` name without Secure is
+    # refused too. See _delete_cookie.
+    _delete_cookie(response, SAML_STATE_COOKIE_SECURE, secure=True, samesite="none")
+    _delete_cookie(response, SAML_STATE_COOKIE_PLAIN, secure=False, samesite="lax")
 
 
 def session_token(request: Request) -> str:
