@@ -316,9 +316,15 @@ def test_the_installer_parser_executes_nothing(tmp_path):
 
 
 def test_every_documented_variable_is_one_the_app_reads():
-    """A typo here is invisible: the setting simply never takes effect."""
+    """A typo here is invisible: the setting simply never takes effect.
+
+    The character class has to include digits. Without them this reads
+    STOCKROOM_SSO_REJECT_SHA1 out of config.py as "..._SHA", so a variable
+    that IS read looks undocumented -- the enumeration failing rather than the
+    thing it enumerates, which is the trap `_walk_routes` fell into.
+    """
     config_source = (_ROOT / "src" / "stockroom" / "config.py").read_text()
-    known = set(re.findall(r"STOCKROOM_[A-Z_]+", config_source))
+    known = set(re.findall(r"STOCKROOM_[A-Z0-9_]+", config_source))
     documented = {k for k, _, _ in _assignments(_ENV_EXAMPLE.read_text())}
 
     unknown = documented - known

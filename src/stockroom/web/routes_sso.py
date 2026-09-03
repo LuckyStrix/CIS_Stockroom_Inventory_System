@@ -49,6 +49,13 @@ logger = logging.getLogger(__name__)
 # reason the lockout log throttle is: losing it on restart costs nothing.
 _start_throttle = security.RateLimiter(limit=30, per_seconds=60)
 
+# /sso/metadata is public and unauthenticated, and answering it is not free:
+# it parses RIT's metadata, assembles our settings, builds a document and
+# validates it. The parse is cached (saml._material), the rest is not. ITS
+# fetch this occasionally and a person runs `stockroom sso metadata` by hand;
+# nothing legitimate needs it in a loop.
+_metadata_throttle = security.RateLimiter(limit=10, per_seconds=60)
+
 
 def _unavailable() -> str:
     """Why single sign-on cannot be used right now, or "" if it can."""
@@ -160,12 +167,19 @@ def assertion_consumer(
 
 
 @router.get("/sso/metadata")
-def metadata():
+def metadata(request: Request):
     """The document RIT ITS need in order to register this service provider.
 
     Public because it has to be: ITS fetch it, and it contains nothing secret
-    -- an entityID, a URL and a public key.
+    -- an entityID, a URL and a public key. Public and cheap are different
+    questions, though, hence the throttle.
     """
+    if not _metadata_throttle.allow(f"sso-metadata:{client_ip(request)}"):
+        return Response(
+            content="Too many requests for the metadata. Try again shortly.\n",
+            media_type="text/plain",
+            status_code=429,
+        )
     try:
         return Response(content=saml.sp_metadata(), media_type="application/xml")
     except saml.SamlError as exc:

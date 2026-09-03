@@ -10,6 +10,14 @@ Sources, all of which need RIT credentials to read:
 - [SSO — Deploying][deploy] · [Single Sign-On (SSO)][sso] ·
   [SSO — Shibboleth Service Provider][sp] ·
   [SSO — OneLogin Python SAML Toolkit][python]
+- [SAML Cookbook][cookbook] — RIT's worked examples. Its
+  [Python chapter][pysaml2] uses **PySAML2**, not the OneLogin toolkit this
+  application uses; both are listed as acceptable on the Deploying page. It is
+  also where RIT state that attributes "may be mapped to an alias such as
+  `mail`, `uid`, `givenName` or may use an oid", which is why
+  `saml._ATTRIBUTES` accepts both spellings of every attribute.
+- [The ITS request form][form] — the ticket itself, and the source of the
+  metadata template our document is shaped to match.
 - RIT's IdP metadata: <https://shibboleth.main.ad.rit.edu/rit-metadata.xml>
 - [RIT Security Standard: Web][webstd] — the standard this deployment is bound by
 
@@ -18,6 +26,9 @@ Sources, all of which need RIT credentials to read:
 [sp]: https://shibboleth.main.ad.rit.edu/ITSOperations/SSO---Shibboleth-Service-Provider_22252900.html
 [python]: https://shibboleth.main.ad.rit.edu/ITSOperations/SSO---OneLogin-Python-SAML-Toolkit_22252902.html
 [webstd]: https://www.rit.edu/security/sites/rit.edu.security/files/Web2017r1.pdf
+[cookbook]: https://shibboleth.main.ad.rit.edu/docs/saml-cookbook/
+[pysaml2]: https://shibboleth.main.ad.rit.edu/docs/saml-cookbook/code_examples/python.html
+[form]: https://help.rit.edu/sp?id=sc_cat_item&sys_id=ab6aeaf31be2c0505d6afeeccd4bcb2a&sysparm_category=4d715cbb1b0ac0d07cc34377cc4bcba3
 
 ## What an earlier draft of this document got wrong
 
@@ -176,6 +187,46 @@ on the release policy, so `saml._ATTRIBUTES` accepts either.
 SAML is not a queryable directory, so there is no way to look up a person who
 has not signed in. That is why borrower records are still just a name and an
 email — the stockroom lends to visitors with no RIT login at all.
+
+## Signing, encryption and SHA-1
+
+Three settings, and the trap is that two of them do not mean what their names
+suggest.
+
+**`STOCKROOM_SSO_SIGN_REQUESTS` (default on) is a metadata setting.** It sets
+`AuthnRequestsSigned` in the document ITS register as well as deciding whether
+we actually sign. Changing it after registration means sending ITS a new
+document, so it is not a restart-and-see knob. On by default because RIT ask
+for it twice: `signing="true"` on the service provider page, and
+`AuthnRequestsSigned="true"` in the request form's template.
+
+**`STOCKROOM_SSO_ENCRYPTED_ASSERTIONS` (default off) is not about whether RIT
+can encrypt.** Our metadata publishes an `encryption` `KeyDescriptor`
+unconditionally, and python3-saml decrypts an `EncryptedAssertion` whenever it
+finds one. This flag only decides whether an assertion arriving *in the clear*
+is refused. It is off because turning it on before knowing ITS encrypt would
+refuse every sign-in; turn it on once one has been seen arriving encrypted.
+
+That separation costs an override in `saml.sp_metadata`, because the toolkit
+conflates the two: `get_sp_metadata` emits the encryption key only when
+`wantAssertionsEncrypted` is set, and that same flag makes cleartext a hard
+error. The honest combination — "you may encrypt, and we will not refuse you
+if you do not" — is unreachable through the settings alone. It matters because
+a Shibboleth IdP encrypts to whichever service providers advertise a key: with
+the toolkit's default we would have registered a document saying we cannot
+decrypt, and turning encryption on later would have been a second ticket.
+
+**`STOCKROOM_SSO_REJECT_SHA1` (default on) is a stopgap that should never be
+used.** It exists because of what `rit-metadata.xml` looks like: a signing
+certificate issued in 2008, `urn:mace:shibboleth:1.0` and SAML 1.1 still
+advertised. A Shibboleth IdP of that age signed with RSA-SHA1, which we refuse
+— correctly, since SHA-1 collisions are practical. If ITS turn out to be one,
+the alternative to this switch is nobody signing in until another team changes
+something, so the switch exists; `stockroom doctor` reports WARN for as long
+as it is off, and question 1 of the ITS ticket is there to make sure it never
+has to be. Nothing in the test suite can catch this in production's favour —
+`tests/fixtures/saml_idp.py` signs whichever way the test asks, and both
+positions are tested, but only RIT can say which one they are.
 
 ## Roles
 

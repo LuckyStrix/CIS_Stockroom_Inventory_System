@@ -1,14 +1,24 @@
 # Registering this service provider with RIT ITS
 
-Everything the ITS ticket asks for, in one place. Open the ticket at
-<https://help.rit.edu/> (Single Sign-On integration request); RIT's
-[SSO — Deploying][deploy] page lists what they want.
+Everything the ITS ticket asks for, in one place. The ticket is
+[**Configure New use of RIT Login for an application**][form] in the RIT
+Service Center; RIT's [SSO — Deploying][deploy] page and the
+[SAML Cookbook][cookbook] say what they expect of us first.
+
+The form's own words: *"Before submitting this request, you must have a SAML
+service provider configured."* Its fields are, in order — metadata location,
+application/server administrator, description, desired attributes, how the
+attributes will be used, whether they will be stored, whether the server is
+compliant with the RIT ISO server security standard, and a desired due date.
+Sections 1–5 below answer them in that order.
 
 **Do this first.** It is a request to another team, it is the long pole, and
 no code change substitutes for it. The application ships with
 `STOCKROOM_AUTH_MODE="password"` and stays that way until this comes back.
 
 [deploy]: https://shibboleth.main.ad.rit.edu/ITSOperations/SSO---Deploying_22252854.html
+[cookbook]: https://shibboleth.main.ad.rit.edu/docs/saml-cookbook/
+[form]: https://help.rit.edu/sp?id=sc_cat_item&sys_id=ab6aeaf31be2c0505d6afeeccd4bcb2a&sysparm_category=4d715cbb1b0ac0d07cc34377cc4bcba3
 
 ## Before you open the ticket
 
@@ -36,16 +46,39 @@ answers below are departmental commitments, not one person's.
 |---|---|
 | entityID | `https://cisstockroom.device.rit.edu/shibboleth` |
 | Assertion Consumer Service | `https://cisstockroom.device.rit.edu/sso/acs` |
-| ACS binding | HTTP-POST, index 0, default |
+| ACS binding | HTTP-POST, `index="1"` — the index in RIT's own template |
+| AuthnRequestsSigned | `true` |
+| Key descriptors | `signing` **and** `encryption`, the same self-signed certificate |
 | Metadata URL | `https://cisstockroom.device.rit.edu/sso/metadata` |
 | Single Logout | **none offered** — RIT's IdP publishes none either |
 | Host | `cisstockroom.device.rit.edu` → 129.21.66.182 |
 | Reachable from | the campus network only (ufw: 129.21.0.0/16 and the private ranges eduroam NATs behind) |
 | Implementation | `python3-saml`, the OneLogin Python toolkit RIT document |
 
-Attach the metadata document to the ticket as well as giving the URL — the
-host is firewalled to campus, so ITS may not be able to fetch it from wherever
-they are.
+Attach the metadata document to the ticket as well as giving the URL. The form
+says metadata "must be available at the provided URL, using HTTPS, and from
+the RIT network. Otherwise attach the metadata file to this request" — and
+this host is firewalled to campus, so assume they cannot fetch it.
+
+`stockroom sso metadata` emits a document in the shape the form's template
+shows: `AuthnRequestsSigned="true"`, a `signing` and an `encryption`
+`KeyDescriptor`, and `AssertionConsumerService … index="1"`. Two deliberate
+differences to mention if asked:
+
+- **`WantAssertionsSigned="true"`** where their template shows `false`. We
+  refuse an unsigned assertion; that is stricter than they ask for, not
+  looser.
+- **`NameIDFormat` is `transient`** where their template shows `unspecified`.
+  Transient is one of the two formats `rit-metadata.xml` actually advertises,
+  and we identify people by the `uid` attribute rather than by NameID, so
+  nothing depends on which is issued.
+
+**The encryption key is published whether or not we require encryption.** They
+are separate settings here (`STOCKROOM_SSO_ENCRYPTED_ASSERTIONS` controls only
+whether an unencrypted assertion is *refused*), so ITS can turn encryption on
+at their end at any time without us re-registering. Signing is the opposite:
+`STOCKROOM_SSO_SIGN_REQUESTS` is written into the metadata, so changing it
+after registration means sending ITS a new document.
 
 ## 2. Application purpose
 
@@ -123,20 +156,34 @@ single-file change if ISO would prefer that. Ask them which they want.
 
 ## 6. Questions to ask ITS
 
-1. **Do you require signed AuthnRequests?** (`STOCKROOM_SSO_SIGN_REQUESTS`)
-2. **Do you require encrypted assertions?** (`STOCKROOM_SSO_ENCRYPTED_ASSERTIONS`)
-3. **Can we get a browser-trusted TLS certificate for
+1. **What algorithm does the IdP sign assertions with?** This is the one that
+   can stop the migration dead. `rit-metadata.xml` carries a signing
+   certificate issued in **2008-11-25** and the entity still advertises
+   `urn:mace:shibboleth:1.0` and SAML 1.1 endpoints; an identity provider of
+   that vintage signed with **RSA-SHA1**, which this application refuses by
+   default and should. If ITS confirm SHA-1, `STOCKROOM_SSO_REJECT_SHA1="0"`
+   gets sign-ins working while they move to SHA-256 — `stockroom doctor`
+   warns for as long as it is set, because it is a stopgap and not an answer.
+   Ask this **before** the migration term is planned; nothing in our test
+   suite can tell us, since our fake identity provider signs SHA-256.
+2. **Do you encrypt assertions to service providers that advertise a key?**
+   We advertise one, so nothing needs to change either way. If they do, say
+   so and `STOCKROOM_SSO_ENCRYPTED_ASSERTIONS="1"` makes it a requirement
+   rather than a courtesy.
+3. **Are signed AuthnRequests verified, or ignored?** We sign, per their
+   template. Only worth asking so that nobody is surprised later.
+4. **Can we get a browser-trusted TLS certificate for
    `cisstockroom.device.rit.edu`?** It is currently self-signed. A certificate
    warning in the middle of a sign-in redirect is where users abandon, and
    `.device.rit.edu` may not be an eligible namespace — this is the question
    to settle early. The SAML signing keypair is separate and is self-signed by
    design; it does not need a certificate authority.
-4. **How will we know when the IdP signing certificate rotates?** A stale
+5. **How will we know when the IdP signing certificate rotates?** A stale
    cached copy of `rit-metadata.xml` fails every sign-in with a signature
    error. `stockroom doctor` warns at six months; a heads-up is better.
-5. **Is MFA applied to this service?** ITS decide; the application requests no
+6. **Is MFA applied to this service?** ITS decide; the application requests no
    particular authentication context and will not override the policy.
-6. **Expected turnaround**, so the migration term can be planned.
+7. **Expected turnaround**, so the migration term can be planned.
 
 ## 7. After ITS say yes
 

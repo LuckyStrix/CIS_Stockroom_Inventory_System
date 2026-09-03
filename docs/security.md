@@ -106,6 +106,12 @@ application never sees a password. Full detail in
   browser is still signed in to RIT. On the shared counter machine this is a
   real residual risk; the mitigations are a short
   `STOCKROOM_SESSION_IDLE_HOURS` and closing the browser.
+- **SHA-1 is refused by default.** `STOCKROOM_SSO_REJECT_SHA1="0"` accepts
+  assertions signed with RSA-SHA1, and exists only because RIT's identity
+  provider is old enough that it might still sign that way — see
+  [sso-integration.md](sso-integration.md). It is a real weakening,
+  `stockroom doctor` reports WARN for as long as it is set, and it should be
+  held open only until ITS move to SHA-256.
 - **The escape hatch.** Set `STOCKROOM_AUTH_MODE="password"` and restart.
   Everyone with a password is back in at once. That is why the password
   machinery has not been deleted.

@@ -434,13 +434,26 @@ def check_sso(conn: sqlite3.Connection | None = None) -> Check:
     except OSError:
         age = None
     detail = f"{config.AUTH_MODE} · {saml.entity_id()}"
+
+    warnings = []
     if age is not None and age > 24 * 180:
         # RIT rotate their signing certificate. Cached metadata that predates
         # a rotation fails every sign-in with a signature error, and the fix
         # -- `stockroom sso init --refresh` -- is not one anybody guesses.
-        return Check("single sign-on", WARN,
-                     f"{detail} · RIT metadata cached {_describe_age(age)}; "
-                     "refresh it with `stockroom sso init --refresh`")
+        warnings.append(
+            f"RIT metadata cached {_describe_age(age)}; "
+            "refresh it with `stockroom sso init --refresh`"
+        )
+    if not config.SSO_REJECT_SHA1:
+        # Said out loud every time, because this is meant to be a stopgap held
+        # open while ITS move the identity provider, and a stopgap nobody is
+        # reminded of is a permanent setting.
+        warnings.append(
+            "STOCKROOM_SSO_REJECT_SHA1=0 — SHA-1 signed assertions are being "
+            "accepted; ask ITS to sign with SHA-256 and turn this back on"
+        )
+    if warnings:
+        return Check("single sign-on", WARN, f"{detail} · " + " · ".join(warnings))
     return Check("single sign-on", OK, detail)
 
 

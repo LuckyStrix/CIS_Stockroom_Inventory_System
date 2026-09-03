@@ -185,11 +185,46 @@ def _read(path) -> str:
         raise SamlNotConfigured(f"Cannot read {path}: {exc}") from exc
 
 
-def settings_dict() -> dict:
-    """The toolkit's settings, assembled from config and the cached metadata."""
-    _require_configured()
-    _, _, IdPMetadataParser = _toolkit()
+# The parsed IdP metadata and the keypair, cached until one of the files
+# changes. Everything else in settings_dict() is string assembly; this is the
+# part that costs -- lxml over RIT's metadata plus three file reads -- and it
+# used to happen on every /sso/login, twice per sign-in, and on every hit of
+# the public, unauthenticated /sso/metadata.
+#
+# Keyed on each file's path, size and mtime, which covers both the thing that
+# changes it in production -- `stockroom sso init --refresh` rewriting the
+# metadata -- and the thing that changes it in the suite, a test pointing
+# config.SSO_* at its own tmp_path.
+_MATERIAL: tuple | None = None
 
+
+def _stat_key(path) -> tuple:
+    try:
+        info = path.stat()
+    except OSError:
+        return (str(path), None, None)
+    return (str(path), info.st_mtime_ns, info.st_size)
+
+
+def _material_key() -> tuple:
+    return (
+        _stat_key(config.SSO_IDP_METADATA),
+        _stat_key(config.SSO_SP_CERT),
+        _stat_key(config.SSO_SP_KEY),
+    )
+
+
+def _material() -> tuple[dict, str, str]:
+    """(idp settings, SP certificate, SP private key), parsed at most once."""
+    global _MATERIAL
+
+    key = _material_key()
+    if _MATERIAL is not None:
+        cached_key, idp, cert, private_key = _MATERIAL
+        if cached_key == key:
+            return idp, cert, private_key
+
+    _, _, IdPMetadataParser = _toolkit()
     try:
         parsed = IdPMetadataParser.parse(_read(config.SSO_IDP_METADATA))
     except Exception as exc:  # the parser raises a variety of lxml errors
@@ -201,8 +236,25 @@ def settings_dict() -> dict:
     if not idp.get("entityId") or not idp.get("singleSignOnService"):
         raise SamlNotConfigured(
             f"{config.SSO_IDP_METADATA} names no identity provider. "
-            "Refresh it with `stockroom sso refresh-metadata`."
+            "Refresh it with `stockroom sso init --refresh`."
         )
+
+    cert = _read(config.SSO_SP_CERT)
+    private_key = _read(config.SSO_SP_KEY)
+    _MATERIAL = (key, idp, cert, private_key)
+    return idp, cert, private_key
+
+
+def settings_dict() -> dict:
+    """The toolkit's settings, assembled from config and the cached metadata.
+
+    A fresh dict every call, deliberately: the toolkit's `_add_default_values`
+    mutates what it is handed, so a shared one would accumulate defaults from
+    every previous use. Only the expensive parsing is cached -- see
+    :func:`_material`.
+    """
+    _require_configured()
+    idp, cert, private_key = _material()
 
     return {
         # strict means every validation the specification calls for is
@@ -221,10 +273,12 @@ def settings_dict() -> dict:
             },
             "NameIDFormat":
                 "urn:oasis:names:tc:SAML:2.0:nameid-format:transient",
-            "x509cert": _read(config.SSO_SP_CERT),
-            "privateKey": _read(config.SSO_SP_KEY),
+            "x509cert": cert,
+            "privateKey": private_key,
         },
-        "idp": idp,
+        # Copied, for the same reason the outer dict is rebuilt: the toolkit
+        # writes defaults into the nested settings it is given.
+        "idp": dict(idp),
         "security": {
             "authnRequestsSigned": config.SSO_SIGN_REQUESTS,
             "wantAssertionsSigned": True,
@@ -239,7 +293,12 @@ def settings_dict() -> dict:
             "signatureAlgorithm":
                 "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
             "digestAlgorithm": "http://www.w3.org/2001/04/xmlenc#sha256",
-            "rejectDeprecatedAlgorithm": True,
+            # Refuses RSA-SHA1 and SHA-1 digests on the way in. A switch
+            # rather than a constant because RIT's IdP is old enough that it
+            # might still sign that way -- see config.SSO_REJECT_SHA1, which
+            # explains why the escape hatch has to exist and why using it is
+            # a weakening.
+            "rejectDeprecatedAlgorithm": config.SSO_REJECT_SHA1,
         },
     }
 
@@ -260,11 +319,38 @@ def _request_data(post_data: dict | None = None) -> dict:
 
 
 def sp_metadata() -> str:
-    """Our own metadata -- the document RIT ITS need in order to register us."""
+    """Our own metadata -- the document RIT ITS need in order to register us.
+
+    The published document always offers an **encryption** key as well as a
+    signing one, whatever ``config.SSO_ENCRYPTED_ASSERTIONS`` says. Those are
+    two different questions and the toolkit conflates them:
+    ``get_sp_metadata`` emits the encryption ``KeyDescriptor`` only when
+    ``wantAssertionsEncrypted`` is set, and that flag *also* makes an
+    unencrypted assertion a hard error. So the honest combination -- "you may
+    encrypt to us, and we will not refuse you if you do not" -- is
+    unreachable through the settings alone, and the default produced metadata
+    that told RIT we could not decrypt anything.
+
+    That mattered here. RIT's service provider page configures
+    ``encryption="true"``, the metadata template on the ITS request form
+    carries both key descriptors, and RIT's own Python cookbook has an
+    ``encryption_keypairs`` entry. A Shibboleth IdP encrypts to whichever SPs
+    advertise a key, so publishing one is what lets ITS turn encryption on
+    without us re-registering. Decryption needs nothing else switched on:
+    python3-saml decrypts an ``EncryptedAssertion`` whenever it finds one.
+
+    So the override below is scoped to this document and does not reach
+    :func:`parse_response`, where ``wantAssertionsEncrypted`` keeps meaning
+    what the operator set it to.
+    """
     _, Settings, _ = _toolkit()
-    settings = Settings(settings_dict(), sp_validation_only=True)
-    metadata = settings.get_sp_metadata()
-    errors = settings.validate_metadata(metadata)
+    settings = settings_dict()
+    settings["security"] = {
+        **settings["security"], "wantAssertionsEncrypted": True
+    }
+    built = Settings(settings, sp_validation_only=True)
+    metadata = built.get_sp_metadata()
+    errors = built.validate_metadata(metadata)
     if errors:
         raise SamlError(f"The generated metadata is invalid: {errors}")
     return metadata.decode("utf-8") if isinstance(metadata, bytes) else metadata

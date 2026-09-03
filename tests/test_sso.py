@@ -477,6 +477,153 @@ def test_the_metadata_says_so_when_nothing_is_configured(client, temp_env):
     assert "not configured" in response.text
 
 
+def test_the_metadata_offers_an_encryption_key_as_well_as_a_signing_one(idp):
+    """What ITS register decides whether RIT can ever encrypt to us.
+
+    A Shibboleth identity provider encrypts to the service providers that
+    advertise a key for it. Publishing only a signing key says "we cannot
+    decrypt anything", and fixing that later is a second ticket -- so the
+    document offers both, and offers them while
+    STOCKROOM_SSO_ENCRYPTED_ASSERTIONS is off, which is the whole point.
+
+    RIT ask for this twice over: the service provider page configures
+    `encryption="true"`, and the metadata template on the ITS request form
+    carries both KeyDescriptors.
+    """
+    assert config.SSO_ENCRYPTED_ASSERTIONS is False, "the default under test"
+    body = saml.sp_metadata()
+    assert 'use="signing"' in body
+    assert 'use="encryption"' in body
+
+
+def test_offering_the_key_does_not_start_refusing_cleartext(client, idp, conn):
+    """The metadata override must not leak into what we accept.
+
+    Advertising an encryption key and requiring encryption are different
+    settings that the toolkit conflates, so the risk in fixing one is silently
+    changing the other -- and the failure would be every sign-in refused the
+    day this shipped, because RIT are not encrypting yet.
+    """
+    saml.sp_metadata()                      # the call that does the override
+    assert saml.settings_dict()["security"]["wantAssertionsEncrypted"] is False
+
+    request_id, relay = start(client)
+    response = finish(client, idp, request_id, relay)
+    assert response.status_code == 303, response.text[:300]
+
+
+def test_the_metadata_is_rate_limited(client, idp, monkeypatch):
+    """Public, unauthenticated, and not free to answer."""
+    monkeypatch.setattr(
+        "stockroom.web.routes_sso._metadata_throttle",
+        security.RateLimiter(limit=2, per_seconds=60),
+    )
+    assert client.get("/sso/metadata").status_code == 200
+    assert client.get("/sso/metadata").status_code == 200
+    assert client.get("/sso/metadata").status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# algorithms
+# ---------------------------------------------------------------------------
+
+
+def test_an_assertion_signed_with_sha1_is_refused_by_default(client, idp, conn):
+    """SHA-1 is not a signature, and the default says so."""
+    request_id, relay = start(client)
+    response = finish(client, idp, request_id, relay, digest="sha1")
+    assert response.status_code == 403
+    assert accounts.find_by_email(conn, "abc1234@rit.edu") is None
+
+
+def test_sha1_can_be_accepted_when_rits_identity_provider_needs_it(
+        client, idp, conn, monkeypatch):
+    """The escape hatch, proved to work.
+
+    RIT's IdP metadata carries a certificate issued in 2008 and still
+    advertises SAML 1.1, so it may sign the way an identity provider of that
+    age signed. If it does, the alternative to this switch is nobody signing
+    in until ITS change something -- see config.SSO_REJECT_SHA1, which is
+    equally plain that using it is a weakening.
+    """
+    monkeypatch.setattr(config, "SSO_REJECT_SHA1", False)
+    request_id, relay = start(client)
+    response = finish(client, idp, request_id, relay, digest="sha1")
+    assert response.status_code == 303, response.text[:300]
+    assert accounts.find_by_email(conn, "abc1234@rit.edu") is not None
+
+
+def test_the_doctor_says_so_while_sha1_is_being_accepted(idp, conn, monkeypatch):
+    """A stopgap nobody is reminded of becomes a permanent setting."""
+    from stockroom import diagnostics
+
+    assert diagnostics.check_sso(conn).status == diagnostics.OK
+
+    monkeypatch.setattr(config, "SSO_REJECT_SHA1", False)
+    check = diagnostics.check_sso(conn)
+    assert check.status == diagnostics.WARN
+    assert "SHA-1" in check.detail
+
+
+def test_the_authn_request_is_signed(client, idp):
+    """RIT configure `signing="true"` and their metadata template agrees."""
+    response = client.get("/sso/login", follow_redirects=False)
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    assert "Signature" in query
+    assert query["SigAlg"] == [
+        "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
+    ]
+    assert 'AuthnRequestsSigned="true"' in saml.sp_metadata()
+
+
+# ---------------------------------------------------------------------------
+# the settings cache
+# ---------------------------------------------------------------------------
+
+
+def test_the_identity_providers_metadata_is_parsed_once_not_per_request(idp):
+    """/sso/login, /sso/acs and /sso/metadata all used to re-parse it.
+
+    The parse is lxml over RIT's document, and /sso/metadata is public. What
+    is cached is only the parsing; the settings dict is rebuilt every call
+    because the toolkit writes its defaults into whatever it is handed.
+    """
+    reads = []
+    original = saml._read
+    saml._MATERIAL = None
+    try:
+        saml._read = lambda path: (reads.append(path), original(path))[1]
+        first = saml.settings_dict()
+        second = saml.settings_dict()
+        saml.settings_dict()
+    finally:
+        saml._read = original
+        saml._MATERIAL = None
+
+    # Three files, read once between them -- not once per call.
+    assert len(reads) == 3, reads
+
+    assert first == second
+    assert first is not second, "a shared dict would collect the toolkit's defaults"
+    assert first["idp"] is not second["idp"], "nor would a shared idp dict"
+
+
+def test_refreshing_rits_metadata_takes_effect_without_a_restart(idp, tmp_path):
+    """`stockroom sso init --refresh` rewrites the file the cache is keyed on."""
+    before = saml.settings_dict()["idp"]["entityId"]
+    assert before == saml_idp.IDP_ENTITY_ID
+
+    replacement = config.SSO_IDP_METADATA.read_text().replace(
+        saml_idp.IDP_ENTITY_ID, "https://elsewhere.invalid/idp/shibboleth"
+    )
+    config.SSO_IDP_METADATA.write_text(replacement)
+    # st_mtime_ns has nanosecond resolution, but the size changed too and the
+    # key carries both -- so this does not depend on the clock ticking.
+    assert saml.settings_dict()["idp"]["entityId"] == (
+        "https://elsewhere.invalid/idp/shibboleth"
+    )
+
+
 def test_the_public_paths_do_not_match_a_longer_word():
     """The same trap /public has: a prefix would exempt anything beginning so."""
     assert deps.is_public_path("/sso/login")

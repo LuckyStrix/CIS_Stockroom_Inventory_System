@@ -45,8 +45,9 @@ Environment variables (all optional):
     STOCKROOM_SSO_AUTO_APPROVE        "0" to make a new SSO account wait for
                                       staff approval (default: active at once)
     STOCKROOM_SSO_HANDSHAKE_TTL       seconds a started sign-in stays valid (300)
-    STOCKROOM_SSO_SIGN_REQUESTS       "1" if ITS require signed AuthnRequests
-    STOCKROOM_SSO_ENCRYPTED_ASSERTIONS "1" if ITS require encrypted assertions
+    STOCKROOM_SSO_SIGN_REQUESTS       sign our AuthnRequests (default "1")
+    STOCKROOM_SSO_ENCRYPTED_ASSERTIONS "1" to REFUSE an unencrypted assertion
+    STOCKROOM_SSO_REJECT_SHA1         "0" only if RIT's IdP still signs SHA-1
 """
 
 from __future__ import annotations
@@ -395,8 +396,43 @@ SSO_HANDSHAKE_TTL_SECONDS: int = int(
     os.environ.get("STOCKROOM_SSO_HANDSHAKE_TTL", "300")
 )
 
-# Both are asked of ITS at registration and set to whatever they answer.
-SSO_SIGN_REQUESTS: bool = _env_bool("STOCKROOM_SSO_SIGN_REQUESTS", False)
+# Whether our AuthnRequests are signed. Defaults ON because RIT asks for it in
+# two places: the Shibboleth service provider page configures
+# `signing="true"`, and the metadata template on the ITS request form has
+# `AuthnRequestsSigned="true"`. Signing costs us nothing -- ITS already have
+# our certificate, because it is in the metadata they registered.
+#
+# Changing this changes the METADATA, not just our behaviour, so flipping it
+# after registration means sending ITS a new document. See
+# docs/its-registration.md.
+SSO_SIGN_REQUESTS: bool = _env_bool("STOCKROOM_SSO_SIGN_REQUESTS", True)
+
+# Whether an assertion that arrives in the clear is REFUSED. Note what this is
+# not: it is not "can RIT encrypt to us". The encryption key is published in
+# our metadata either way (see saml.sp_metadata), and python3-saml decrypts an
+# EncryptedAssertion whenever it finds one, whatever this says. So RIT can
+# always encrypt, and this only decides whether an unencrypted assertion is a
+# hard error.
+#
+# Default off, because turning it on before knowing ITS actually encrypt would
+# refuse every sign-in. Turn it on once a real assertion has been seen
+# arriving encrypted -- it is then a genuine tightening, and it needs no new
+# metadata.
 SSO_ENCRYPTED_ASSERTIONS: bool = _env_bool(
     "STOCKROOM_SSO_ENCRYPTED_ASSERTIONS", False
 )
+
+# Whether an assertion signed with SHA-1 (RSA-SHA1, or a SHA-1 digest) is
+# refused. It should be, and the default says so.
+#
+# It is a switch rather than a constant because of what RIT's IdP metadata
+# looks like: the signing certificate was issued in 2008, and the entity still
+# advertises `urn:mace:shibboleth:1.0` and SAML 1.1 endpoints. A Shibboleth
+# IdP of that vintage signed with RSA-SHA1 by default. If ITS turn out to be
+# one, every sign-in fails with "Deprecated signature algorithm found" and the
+# only remedy must not be editing this file on a Pi at 9am.
+#
+# Setting this to "0" is a real weakening -- SHA-1 collisions are practical --
+# so it is a stopgap to be held open only while ITS move the IdP, and
+# `stockroom doctor` says so out loud for as long as it is off.
+SSO_REJECT_SHA1: bool = _env_bool("STOCKROOM_SSO_REJECT_SHA1", True)

@@ -270,6 +270,14 @@ tests/fixtures/saml_idp.py     <- a fake IdP that really signs assertions
 docs/its-registration.md       <- the ITS ticket
 ```
 
+**Two settings do not mean what they look like.** `SSO_SIGN_REQUESTS` is
+written into the *metadata* ITS registered, so changing it after registration
+needs a new ticket, not a restart. `SSO_ENCRYPTED_ASSERTIONS` decides only
+whether *cleartext is refused* — the encryption key is published either way,
+because `sp_metadata()` overrides the flag for that document alone. The
+toolkit conflates the two and its default publishes no encryption key at all,
+which would have told RIT we cannot decrypt.
+
 `accounts.sso_login` is the one new audited mutation. python3-saml is an
 optional extra (`pip install -e '.[sso]'`), imported lazily, so the
 application starts and the suite runs without it.

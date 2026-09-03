@@ -126,6 +126,7 @@ def signed_response(
     lifetime_seconds: int = 300,
     sign: bool = True,
     issuer: str | None = None,
+    digest: str = "sha256",
 ) -> str:
     """A base64 SAMLResponse, signed the way a real Shibboleth IdP signs one.
 
@@ -133,6 +134,11 @@ def signed_response(
     settings this project uses set ``wantAssertionsSigned``. Signing the
     envelope instead would leave the assertion itself unprotected, which is
     the mistake the setting exists to prevent.
+
+    ``digest="sha1"`` signs with RSA-SHA1 and a SHA-1 digest, which is how a
+    Shibboleth identity provider of the vintage RIT's metadata suggests would
+    sign. It exists so that `config.SSO_REJECT_SHA1` can be tested in both
+    positions -- a switch nothing ever flips is a switch nobody knows works.
     """
     from onelogin.saml2.constants import OneLogin_Saml2_Constants
     from onelogin.saml2.utils import OneLogin_Saml2_Utils
@@ -167,10 +173,17 @@ def signed_response(
 </saml:Assertion>"""
 
     if sign:
+        algorithms = {
+            "sha256": (OneLogin_Saml2_Constants.RSA_SHA256,
+                       OneLogin_Saml2_Constants.SHA256),
+            "sha1": (OneLogin_Saml2_Constants.RSA_SHA1,
+                     OneLogin_Saml2_Constants.SHA1),
+        }
+        sign_algorithm, digest_algorithm = algorithms[digest]
         signed = OneLogin_Saml2_Utils.add_sign(
             assertion, keypair.key_pem, keypair.cert_pem,
-            sign_algorithm=OneLogin_Saml2_Constants.RSA_SHA256,
-            digest_algorithm=OneLogin_Saml2_Constants.SHA256,
+            sign_algorithm=sign_algorithm,
+            digest_algorithm=digest_algorithm,
         )
         assertion = signed.decode("utf-8") if isinstance(signed, bytes) else signed
         # add_sign returns a whole document; drop its XML declaration so the
