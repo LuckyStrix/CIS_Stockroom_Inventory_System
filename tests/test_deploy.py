@@ -130,11 +130,16 @@ def test_the_nightly_job_always_reaches_the_health_check():
     the diagnosis running.
     """
     commands = _exec_starts("stockroom-backup.service")
-    assert len(commands) == 3, "the nightly job's steps changed; re-read this test"
+    assert len(commands) == 4, "the nightly job's steps changed; re-read this test"
 
-    backup, prune, doctor = commands
+    backup, prune, archive_logs, doctor = commands
     assert backup.startswith("-"), "a failed backup still aborts the whole unit"
     assert prune.startswith("-"), "a failed prune still aborts the whole unit"
+    assert archive_logs.endswith("stockroom archive-logs")
+    assert archive_logs.startswith("-"), (
+        "a journal that cannot be read still aborts the whole unit -- and the "
+        "log archive is exactly the sort of thing that breaks quietly"
+    )
     assert doctor.endswith("stockroom doctor"), "doctor must run last"
     assert not doctor.startswith("-"), (
         "doctor's exit code is what marks the unit failed; leave it unprefixed"
@@ -313,6 +318,38 @@ def test_the_installer_parser_executes_nothing(tmp_path):
 # ---------------------------------------------------------------------------
 # drift between the example and the code
 # ---------------------------------------------------------------------------
+
+
+def test_the_journal_is_made_persistent():
+    """Otherwise there is no log to archive, and nobody finds out.
+
+    Raspberry Pi OS ships journald with Storage=auto and no /var/log/journal,
+    which means the journal is volatile and every reboot throws it away. RIT's
+    server standard (3.5) wants two weeks of it. A cap goes with the
+    retention: an unbounded journal on an SD card wears the card out.
+    """
+    body = (_DEPLOY / "harden-pi.sh").read_text()
+    assert "/var/log/journal" in body, "the journal is still volatile"
+    assert "Storage=persistent" in body
+    assert "MaxRetentionSec=" in body
+    assert "SystemMaxUse=" in body, "an uncapped journal fills the card"
+
+
+def test_the_service_account_can_read_the_whole_journal():
+    """The silent half of the log archive.
+
+    journalctl run by a user outside `systemd-journal` prints that user's own
+    empty journal and exits 0, so the nightly export writes a valid archive of
+    nothing every night. The records the standard asks for -- authentication,
+    privilege escalation, account changes -- belong to sshd and sudo, not to
+    this service.
+    """
+    body = (_DEPLOY / "harden-pi.sh").read_text()
+    assert "systemd-journal" in body
+    assert 'usermod -aG systemd-journal "$SERVICE_USER"' in body
+    assert 'SERVICE_USER="${SERVICE_USER:-stockroom}"' in body, (
+        "SERVICE_USER is used but never set, so the usermod is a no-op"
+    )
 
 
 def test_the_sso_directory_is_writable_by_the_account_that_writes_to_it():

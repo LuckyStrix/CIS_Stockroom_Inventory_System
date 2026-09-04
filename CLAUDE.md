@@ -296,6 +296,26 @@ python3-saml is an
 optional extra (`pip install -e '.[sso]'`), imported lazily, so the
 application starts and the suite runs without it.
 
+### Logs leave the machine too
+
+`logs.py` + `stockroom archive-logs`, in the nightly unit after the snapshot.
+Two things about it are counter-intuitive:
+
+- **The journal is volatile on a stock Pi.** `Storage=auto` with no
+  `/var/log/journal` means every reboot throws the log away, so
+  `harden-pi.sh` makes it persistent. There was no retention before, only the
+  appearance of one.
+- **`journalctl` outside the `systemd-journal` group exits 0 and prints
+  nothing.** So the export happily writes a valid archive of an empty journal,
+  every night. `logs.export` refuses an empty result and names the group;
+  `diagnostics.check_log_archive` decompresses the newest archive and fails if
+  it is empty. Judged by content, never by file size — a log compresses far
+  too well for a byte threshold to mean anything.
+
+It is a night behind, so it is **not** the real-time mirror RIT's standard
+asks for, and the comments say so in every place someone might be tempted to
+claim otherwise.
+
 ### Things phase 3 added that are easy to get wrong
 
 - **`db._ADDED_COLUMNS` and `schema.sql` must agree.** A new column has to be

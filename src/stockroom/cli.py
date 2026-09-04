@@ -337,6 +337,44 @@ def cmd_prune(args) -> int:
     return 0
 
 
+def cmd_archive_logs(args) -> int:
+    """Export a window of the journal and send it off the machine.
+
+    Runs from the nightly unit, after the database snapshot. See
+    stockroom/logs.py for why this is not the "mirrored in real time" the
+    server standard asks for, and what it is instead.
+    """
+    from . import logs
+
+    try:
+        archive = logs.export(days=args.days)
+    except logs.LogExportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Wrote {archive} ({archive.stat().st_size:,} bytes)")
+
+    for stale in logs.prune():
+        print(f"Pruned {stale.name}")
+
+    if args.no_upload:
+        return 0
+
+    targets = backup_targets.configured_targets()
+    if not targets:
+        # Not an error: an installation that has not been told where to put an
+        # off-box copy does not get one invented for it. `doctor` is what says
+        # so, once, rather than this saying it every night.
+        return 0
+
+    failures = backup_targets.copy_logs_to_targets(archive, targets)
+    for target in targets:
+        if not any(f.target == target.name for f in failures):
+            print(f"Sent to {target.name}")
+    for failure in failures:
+        print(f"Error: {failure}", file=sys.stderr)
+    return 1 if failures else 0
+
+
 # ---------------------------------------------------------------------------
 # single sign-on
 # ---------------------------------------------------------------------------
@@ -765,6 +803,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-days", type=int, default=90,
                    help="how long to keep login attempt records (default 90)")
     p.set_defaults(func=cmd_prune)
+
+    p = sub.add_parser(
+        "archive-logs",
+        help="export the journal and send it off the machine (nightly)",
+    )
+    p.add_argument("--days", type=int, default=None,
+                   help=f"how much journal to export (default "
+                        f"{config.LOG_ARCHIVE_DAYS})")
+    p.add_argument("--no-upload", action="store_true",
+                   help="write the archive but do not send it anywhere")
+    p.set_defaults(func=cmd_archive_logs)
 
     # -- single sign-on ----------------------------------------------------
     sso = sub.add_parser("sso", help="set up RIT single sign-on").add_subparsers(

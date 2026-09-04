@@ -309,7 +309,8 @@ rsync -az stockroom-admin@cis-stockroom.local:/var/lib/stockroom/backups/ ~/stoc
 ```
 
 **Test a restore before you need one.** A backup nobody has restored is a
-hypothesis. Once a term, copy a snapshot to a laptop and open it:
+hypothesis. The server standard asks for this **monthly** (checklist item 44),
+and it is two commands — copy a snapshot to a laptop and open it:
 
 ```bash
 STOCKROOM_DB=~/stockroom-backups/stockroom-20260901T023000Z.db \
@@ -317,6 +318,49 @@ STOCKROOM_DB=~/stockroom-backups/stockroom-20260901T023000Z.db \
 ```
 
 If that prints sensible numbers, the backup is real.
+
+### Getting the system log off the card too
+
+The database is not the only thing that dies with the SD card. RIT's Server
+Security Standard wants at least two weeks of authentication,
+privilege-escalation, account-change and job-start-up records (3.5), and wants
+them mirrored onto another server (3.7).
+
+**Retention** is `deploy/harden-pi.sh`'s job, and it is not optional
+housekeeping: Raspberry Pi OS ships journald with `Storage=auto` and no
+`/var/log/journal`, which means the journal is **volatile** and every reboot
+throws the lot away. The script creates the directory, sets
+`Storage=persistent` with a 30-day retention and a 500M cap, and adds the
+service account to `systemd-journal` so it can read more than its own
+entries.
+
+**Getting it off the machine** is the nightly job's, and runs automatically
+once a target is configured — the same USB stick or rclone remote the database
+snapshot goes to:
+
+```bash
+sudo -u stockroom /opt/stockroom/.venv/bin/stockroom archive-logs
+```
+
+> **This is a night behind, so it is not the real-time mirror of (3.7).** Do
+> not initial that item on the strength of it. What it does buy is that when
+> the card dies, the log of what happened beforehand is not on the card.
+
+The window overlaps — two days, nightly, thirty kept — so a night the Pi was
+switched off leaves no hole.
+
+The failure worth knowing about: `journalctl` run by a user outside
+`systemd-journal` prints *that user's own* empty journal and **exits zero**,
+so the export writes a perfectly valid archive of nothing, every night,
+forever. `stockroom doctor` opens the newest archive and fails if it is empty,
+naming the group. If that ever fires, re-run `harden-pi.sh` and
+`sudo systemctl restart stockroom-backup.service` — systemd reads group
+membership at unit start, so the `usermod` does not take effect until then.
+
+What lands in the archive is the same class of information as the snapshot
+beside it — this application logs email addresses — so it goes to the same
+private destination and no further. No password is ever logged;
+`tests/test_source_hygiene.py` is where that stays true.
 
 ### Restore
 

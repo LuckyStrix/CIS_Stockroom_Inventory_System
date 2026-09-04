@@ -41,15 +41,25 @@ log = logging.getLogger(__name__)
 _RCLONE_TIMEOUT = 600
 
 
+# What a nightly log export is called. Kept distinct from the snapshot glob so
+# that the two prune independently and neither can ever delete the other --
+# `stockroom-*` alone would have matched both.
+LOG_PREFIX = "stockroom-logs-"
+LOG_GLOB = f"{LOG_PREFIX}*.txt.gz"
+SNAPSHOT_GLOB = "stockroom-*.db"
+
+
 @runtime_checkable
 class BackupTarget(Protocol):
-    """Delivers one snapshot file to one destination."""
+    """Delivers one snapshot file, and one log archive, to one destination."""
 
     name: str
 
     def store(self, snapshot: Path) -> None: ...
 
     def existing(self) -> list[str]: ...
+
+    def store_log(self, archive: Path) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,15 +129,50 @@ class LocalDirTarget:
         self._prune()
         log.info("copied %s to %s (verified)", snapshot.name, self.directory)
 
+    def store_log(self, archive: Path) -> None:
+        """Copy a journal export across. No integrity check, deliberately.
+
+        `store` verifies its copy with SQLite, because a truncated file that
+        still wears a backup's name is worse than no file. A gzip has no
+        equivalent cheap check worth the read, and a short log costs a night
+        of history rather than the whole database -- so this uses the same
+        write-then-rename so nothing half-written takes the final name, and
+        stops there.
+        """
+        if self.directory is None:
+            raise RuntimeError("BACKUP_COPY_DIR is not configured.")
+        if not self.directory.is_dir():
+            raise RuntimeError(
+                f"{self.directory} is not a directory -- is the drive mounted?"
+            )
+        target = self.directory / archive.name
+        partial = target.with_name(target.name + ".part")
+        try:
+            shutil.copy2(archive, partial)
+            os.replace(partial, target)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
+        self._prune_glob(LOG_GLOB)
+        log.info("copied %s to %s", archive.name, self.directory)
+
     def existing(self) -> list[str]:
         if self.directory is None or not self.directory.is_dir():
             return []
-        return sorted(p.name for p in self.directory.glob("stockroom-*.db"))
+        return sorted(p.name for p in self.directory.glob(SNAPSHOT_GLOB))
+
+    def existing_logs(self) -> list[str]:
+        if self.directory is None or not self.directory.is_dir():
+            return []
+        return sorted(p.name for p in self.directory.glob(LOG_GLOB))
 
     def _prune(self) -> None:
+        self._prune_glob(SNAPSHOT_GLOB)
+
+    def _prune_glob(self, pattern: str) -> None:
         if self.keep <= 0 or self.directory is None:
             return
-        snapshots = sorted(self.directory.glob("stockroom-*.db"))
+        snapshots = sorted(self.directory.glob(pattern))
         for stale in snapshots[: max(0, len(snapshots) - self.keep)]:
             stale.unlink(missing_ok=True)
 
@@ -194,16 +239,33 @@ class RcloneTarget:
         self._prune()
         log.info("uploaded %s to %s", snapshot.name, self.remote)
 
+    def store_log(self, archive: Path) -> None:
+        """Upload a journal export. rclone checksums it, as it does a snapshot."""
+        if not self.remote:
+            raise RuntimeError("BACKUP_REMOTE is not configured.")
+        self._run("copyto", str(archive), f"{self.remote}/{archive.name}")
+        self._prune_glob(LOG_GLOB)
+        log.info("uploaded %s to %s", archive.name, self.remote)
+
     def existing(self) -> list[str]:
+        return self._list(SNAPSHOT_GLOB)
+
+    def existing_logs(self) -> list[str]:
+        return self._list(LOG_GLOB)
+
+    def _list(self, pattern: str) -> list[str]:
         if not self.remote:
             return []
-        result = self._run("lsf", self.remote, "--include", "stockroom-*.db")
+        result = self._run("lsf", self.remote, "--include", pattern)
         return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
 
     def _prune(self) -> None:
+        self._prune_glob(SNAPSHOT_GLOB)
+
+    def _prune_glob(self, pattern: str) -> None:
         if self.keep <= 0:
             return
-        snapshots = self.existing()
+        snapshots = self._list(pattern)
         for stale in snapshots[: max(0, len(snapshots) - self.keep)]:
             self._run("deletefile", f"{self.remote}/{stale}")
             log.info("pruned %s from %s", stale, self.remote)
@@ -233,10 +295,21 @@ def copy_to_targets(
     that already succeeded. The caller decides what a failure means -- for the
     CLI that is a non-zero exit code, so systemd records it.
     """
+    return _send(lambda target: target.store(snapshot), targets)
+
+
+def copy_logs_to_targets(
+    archive: Path, targets: list[BackupTarget] | None = None
+) -> list[TargetError]:
+    """Send one log archive to every configured target, like a snapshot."""
+    return _send(lambda target: target.store_log(archive), targets)
+
+
+def _send(deliver, targets: list[BackupTarget] | None) -> list[TargetError]:
     failures: list[TargetError] = []
     for target in configured_targets() if targets is None else targets:
         try:
-            target.store(snapshot)
+            deliver(target)
         except Exception as exc:
             log.error("backup target %r failed: %s", target.name, exc)
             failures.append(TargetError(target.name, exc))

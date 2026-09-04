@@ -22,6 +22,7 @@ train people to ignore a red timer.
 
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 import sqlite3
@@ -224,6 +225,48 @@ def check_offsite_backups(*, skip_remote: bool = False) -> Check:
         else:
             parts.append(f"{target.name}: {len(found)}, newest {found[-1]}")
     return Check("off-box backups", worst, "; ".join(parts))
+
+
+def check_log_archive() -> Check:
+    """Is the system log leaving the machine, and recently?
+
+    Separate from the backup check because the failure is different and
+    quieter: an export that returns nothing still writes a file, still
+    uploads, and still looks like success. The usual cause is the service
+    account not being in `systemd-journal`, which makes journalctl print that
+    user's own empty journal and exit 0.
+    """
+    archives = sorted(config.BACKUP_DIR.glob(backup_targets.LOG_GLOB))
+    if not archives:
+        return Check(
+            "log archive", WARN,
+            "no journal export yet -- the nightly job runs `stockroom "
+            "archive-logs`; run it once by hand to check it works",
+        )
+
+    newest = archives[-1]
+    age = _age_hours(datetime.fromtimestamp(newest.stat().st_mtime, tz=timezone.utc))
+    detail = f"{len(archives)} kept, newest {newest.name} ({_describe_age(age)})"
+
+    # Judged by what decompresses out of it, not by its size on disk: a log is
+    # extremely compressible, so "small gzip" and "empty journal" are not the
+    # same thing and a byte threshold gets it wrong in both directions. Only
+    # the first few KB are read, which is enough to tell empty from not and
+    # bounded whatever the archive holds.
+    try:
+        with gzip.open(newest, "rt", encoding="utf-8", errors="replace") as handle:
+            head = handle.read(4096)
+    except OSError as exc:
+        return Check("log archive", FAIL, f"{detail} -- unreadable: {exc}")
+    if not head.strip():
+        return Check("log archive", FAIL,
+                     f"{detail} -- and it is empty. The service account is "
+                     "probably not in the `systemd-journal` group; re-run "
+                     "deploy/harden-pi.sh and restart stockroom-backup")
+    if age > 48:
+        return Check("log archive", WARN,
+                     f"{detail} -- the nightly export has not run since")
+    return Check("log archive", OK, detail)
 
 
 def _unwritable_reason(target) -> str:
@@ -473,6 +516,7 @@ def run_all(conn: sqlite3.Connection, *, skip_remote: bool = False) -> Report:
         ("data consistency", lambda: check_data_consistency(conn)),
         ("local backups", lambda: check_backups(conn)),
         ("off-box backups", lambda: check_offsite_backups(skip_remote=skip_remote)),
+        ("log archive", check_log_archive),
         ("public page", lambda: check_publish(conn)),
         ("disk space", lambda: check_disk_space(conn)),
         ("administrators", lambda: check_administrators(conn)),

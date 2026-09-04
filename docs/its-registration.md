@@ -129,6 +129,29 @@ enough to state plainly rather than let ITS discover it.
 - Nothing is sent anywhere else. There is no analytics, no email, no external
   service, and no internet exposure.
 
+## 4a. Logging and backups, for the server checklist
+
+The form's compliance question is about the [Server Security
+Standard][serverstd], whose worked form is the [Server Security
+Checklist][checklist] — 60 items with a signature block. Two groups of them
+are answered by configuration rather than by argument, so they are recorded
+here:
+
+| Item | Answer |
+|---|---|
+| **16** — ≥2 weeks of OS/application logging, timestamped | `deploy/harden-pi.sh` sets `Storage=persistent`, `MaxRetentionSec=30day`, `SystemMaxUse=500M`. Pi OS ships the journal **volatile**; without this there was no retention at all. |
+| **18** — logging mirrored in real time to another secure server | **Not met.** The nightly job exports the journal off-box to the same destination as the database, which is a night behind. Either ask ITS for a central log destination to forward to, or record this as a compensating control — do not initial it. |
+| **42** — operationally critical data backed up | Nightly, verified with SQLite's integrity check before it counts. |
+| **43** — documented backup/restore procedures | `docs/operations.md` §Backups and §Restore. |
+| **44** — verified at least monthly | Trial restore, `docs/operations.md`. |
+| **45** — not stored solely in the same building | `STOCKROOM_BACKUP_REMOTE` to RIT Google Drive. **A USB stick left in the Pi does not satisfy this** — it is the same building. |
+| **55** — registered in a centralized registration system | **To do.** RIT does not publish the system or the form; ask in this ticket. |
+| **7** — software no longer vendor/community supported | `python3-saml`'s last release was October 2023. The item's own remedy is "an exception request pending or granted by the ISO" — file one. |
+| **24/25** — HIPS, required for authentication servers | fail2ban is enabled. In password mode this *is* an authentication server; under SSO it stops being one. |
+
+[serverstd]: https://www.rit.edu/security/server-security
+[checklist]: https://www.rit.edu/security/sites/rit.edu.security/files/documents/ServerSecurityChecklist-2019.pdf
+
 ## 5. ISO security standard compliance
 
 Against the [Web Security Standard][webstd]:

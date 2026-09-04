@@ -32,6 +32,9 @@ Environment variables (all optional):
     STOCKROOM_BACKUP_REMOTE           rclone remote, e.g. "gdrive:stockroom"
     STOCKROOM_RCLONE                  path to the rclone binary
     STOCKROOM_BACKUP_REMOTE_KEEP      snapshots to keep on the remote
+    STOCKROOM_LOG_ARCHIVE_DAYS        days of journal in each nightly export
+    STOCKROOM_LOG_ARCHIVE_KEEP        log archives to keep, locally and off-box
+    STOCKROOM_JOURNALCTL              path to the journalctl binary
     STOCKROOM_PHOTO_DIR               where uploaded item photos are stored
     STOCKROOM_PHOTO_MAX_PIXELS        longest edge after downscaling (1600)
     STOCKROOM_MAX_UPLOAD_BYTES        reject a request body larger than this
@@ -309,6 +312,29 @@ BACKUP_COPY_DIR: Path | None = Path(_copy).expanduser().resolve() if _copy else 
 BACKUP_REMOTE: str = os.environ.get("STOCKROOM_BACKUP_REMOTE", "").strip()
 RCLONE: str = os.environ.get("STOCKROOM_RCLONE", "rclone")
 BACKUP_REMOTE_KEEP: int = int(os.environ.get("STOCKROOM_BACKUP_REMOTE_KEEP", "30"))
+
+# ---------------------------------------------------------------------------
+# Getting the system log off the machine
+#
+# RIT's Server Security Standard asks (3.5) for at least two weeks of
+# authentication, privilege-escalation, account-change and job-start-up
+# logging, and (3.7) for it to be mirrored in real time onto another secure
+# server. deploy/harden-pi.sh makes the journal persistent, which answers the
+# first. The second wants a log server this deployment does not have.
+#
+# What happens instead: the nightly job exports a window of the journal and
+# ships it to the same off-box targets the database snapshot goes to. That is
+# NOT 3.7 -- it is a night behind, not real time -- and calling it that on a
+# checklist would be a lie. It is what makes the log survive the SD card,
+# which is the risk that actually kills this machine.
+#
+# The window overlaps on purpose. A nightly export of "the last two days",
+# kept 30 deep, tolerates a night the Pi was switched off without leaving a
+# hole; an export of exactly one day does not.
+# ---------------------------------------------------------------------------
+LOG_ARCHIVE_DAYS: int = int(os.environ.get("STOCKROOM_LOG_ARCHIVE_DAYS", "2"))
+LOG_ARCHIVE_KEEP: int = int(os.environ.get("STOCKROOM_LOG_ARCHIVE_KEEP", "30"))
+JOURNALCTL: str = os.environ.get("STOCKROOM_JOURNALCTL", "journalctl")
 
 # How long a pending request or signup may sit before it is flagged as stale.
 # There is no email server, so nothing chases anyone: a request is only worked

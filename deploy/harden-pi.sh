@@ -113,6 +113,11 @@ done
 say() { printf '\n\033[1;33m==> %s\033[0m\n' "$1"; }
 warn() { printf '\033[1;31m!!  %s\033[0m\n' "$1"; }
 
+# The account deploy/setup-pi.sh creates for the service. Named here only so
+# the journal group membership below can be granted; this script otherwise
+# touches nothing the application owns, and runs happily before it exists.
+SERVICE_USER="${SERVICE_USER:-stockroom}"
+
 say "Installing security packages"
 apt-get update -qq
 apt-get install -y --no-install-recommends \
@@ -246,6 +251,47 @@ systemctl enable --now fail2ban
 systemctl restart fail2ban
 
 # ---------------------------------------------------------------------------
+say "Making the system log survive a reboot"
+# ---------------------------------------------------------------------------
+# On a stock Raspberry Pi OS the journal is VOLATILE. systemd-journald ships
+# Storage=auto, which means "persist only if /var/log/journal exists", and
+# Debian does not create it -- so every reboot throws the log away. RIT's
+# Server Security Standard (3.5) wants at least two weeks of authentication,
+# privilege-escalation, account-change and job-start-up records, and this is
+# what makes that true rather than accidental.
+#
+# The cap matters as much as the retention: an unbounded journal on an SD card
+# is a way to wear the card out and then fill it. 500M and 30 days is roughly
+# a year of this machine's traffic.
+install -d -m 2755 /var/log/journal
+systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+
+install -d -m 0755 /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/stockroom.conf <<'EOF'
+# Written by deploy/harden-pi.sh. See docs/operations.md.
+[Journal]
+Storage=persistent
+MaxRetentionSec=30day
+SystemMaxUse=500M
+SystemMaxFileSize=50M
+EOF
+systemctl restart systemd-journald
+
+# The nightly export reads the WHOLE journal, not just the stockroom unit,
+# because the records the standard asks for are sshd's, sudo's and systemd's.
+# A user outside this group gets its own (empty) journal back, and journalctl
+# exits 0 while doing it -- so without this the archives are silently empty.
+# stockroom/logs.py names that failure if it ever happens anyway.
+if id "$SERVICE_USER" >/dev/null 2>&1; then
+    usermod -aG systemd-journal "$SERVICE_USER"
+    echo "Added $SERVICE_USER to systemd-journal."
+else
+    echo "No $SERVICE_USER account yet -- run deploy/setup-pi.sh, then re-run this."
+fi
+
+journalctl --disk-usage
+
+# ---------------------------------------------------------------------------
 say "Applying kernel network hardening"
 # ---------------------------------------------------------------------------
 cat > /etc/sysctl.d/99-stockroom.conf <<'EOF'
@@ -284,6 +330,7 @@ cat <<EOF
   SSH          $( [[ $SKIP_SSH -eq 1 ]] && echo "unchanged" || echo "key-only (if a key was present)" )
   Updates      security patches applied automatically, reboots left to you
   fail2ban     active on sshd
+  Journal      persistent, 30 days, capped at 500M
 
   Check it from ANOTHER machine -- this is the test that matters:
 

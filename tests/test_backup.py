@@ -192,7 +192,10 @@ def fake_rclone(tmp_path):
         echo "$*" >> {log}
         case "$1" in
           copyto) cp "$2" "{drive}/$(basename "$3")" ;;
-          lsf) ls "{drive}" 2>/dev/null | grep '^stockroom-.*\\.db$' || true ;;
+          lsf) pat="${{4:-*}}"
+               ls -1 "{drive}" 2>/dev/null | while read -r f; do
+                 case "$f" in $pat) echo "$f" ;; esac
+               done ;;
           deletefile) rm -f "{drive}/$(basename "$2")" ;;
           *) echo "unsupported: $1" >&2; exit 1 ;;
         esac
@@ -292,7 +295,7 @@ def test_targets_are_built_from_configuration(temp_env, monkeypatch, tmp_path):
 def test_every_check_runs_against_an_empty_database(conn):
     """`doctor` must work on a Pi that was set up five minutes ago."""
     report = diagnostics.run_all(conn, skip_remote=True)
-    assert len(report.checks) == 12
+    assert len(report.checks) == 13
     assert all(isinstance(c.detail, str) and c.detail for c in report.checks)
 
 
@@ -380,4 +383,175 @@ def test_a_broken_check_becomes_a_finding_rather_than_a_crash(conn, monkeypatch)
     monkeypatch.setattr(diagnostics, "check_disk_space", explode)
     report = diagnostics.run_all(conn, skip_remote=True)
     assert "disk space" in [c.name for c in report.failures]
-    assert len(report.checks) == 12
+    assert len(report.checks) == 13
+
+
+# ---------------------------------------------------------------------------
+# the nightly log archive
+#
+# The whole point of this is that the log survives the SD card, so what the
+# tests care about is the two ways it can silently not do that: an empty
+# journal that still produces a file, and an archive that never leaves.
+# ---------------------------------------------------------------------------
+
+
+def fake_journalctl(tmp_path: Path, body: str, *, code: int = 0,
+                    stderr: str = "") -> str:
+    """A journalctl that prints what the test wants. Real subprocess, no mock."""
+    script = tmp_path / "journalctl"
+    script.write_text(textwrap.dedent(f"""\
+        #!/bin/sh
+        printf '%s' {body!r}
+        printf '%s' {stderr!r} >&2
+        exit {code}
+    """))
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_the_export_writes_a_readable_gzip(tmp_path, temp_env):
+    from stockroom import logs
+
+    binary = fake_journalctl(tmp_path, "2026-09-03 sshd: Accepted publickey\n")
+    archive = logs.export(tmp_path / "out.txt.gz", days=2, journalctl=binary)
+
+    import gzip
+    assert archive.exists()
+    with gzip.open(archive, "rt") as handle:
+        assert "Accepted publickey" in handle.read()
+
+
+def test_an_empty_journal_is_an_error_not_an_empty_archive(tmp_path, temp_env):
+    """The failure this check exists for.
+
+    journalctl run by a user outside `systemd-journal` prints that user's own
+    empty journal and exits 0. Writing that out produces a file that satisfies
+    every existence-and-age check while containing nothing -- discovered, like
+    every backup problem, on the day somebody needs it.
+    """
+    from stockroom import logs
+
+    binary = fake_journalctl(tmp_path, "")
+    with pytest.raises(logs.LogExportError) as caught:
+        logs.export(tmp_path / "out.txt.gz", days=2, journalctl=binary)
+    assert "systemd-journal" in str(caught.value)
+    assert not (tmp_path / "out.txt.gz").exists()
+
+
+def test_a_failing_journalctl_surfaces_its_own_error(tmp_path, temp_env):
+    from stockroom import logs
+
+    binary = fake_journalctl(tmp_path, "", code=1, stderr="Failed to open journal\n")
+    with pytest.raises(logs.LogExportError) as caught:
+        logs.export(tmp_path / "out.txt.gz", journalctl=binary)
+    assert "Failed to open journal" in str(caught.value)
+
+
+def test_a_missing_journalctl_says_so(tmp_path, temp_env):
+    from stockroom import logs
+
+    with pytest.raises(logs.LogExportError) as caught:
+        logs.export(tmp_path / "out.txt.gz",
+                    journalctl=str(tmp_path / "not-installed"))
+    assert "not available" in str(caught.value)
+
+
+def test_log_archives_and_snapshots_never_prune_each_other(tmp_path, temp_env):
+    """They share a directory and both start `stockroom-`.
+
+    A single glob would have let thirty nightly log archives evict every
+    database snapshot, which is the one failure mode worse than having no log
+    archive at all.
+    """
+    from stockroom import logs
+
+    for n in range(3):
+        (tmp_path / f"stockroom-2026090{n}T000000Z.db").write_text("db")
+    for n in range(5):
+        (tmp_path / f"stockroom-logs-2026090{n}T000000Z.txt.gz").write_text("gz")
+
+    removed = logs.prune(tmp_path, keep=2)
+
+    assert len(removed) == 3
+    assert all(p.name.startswith("stockroom-logs-") for p in removed)
+    assert len(sorted(tmp_path.glob("stockroom-*.db"))) == 3
+    assert len(sorted(tmp_path.glob("stockroom-logs-*.txt.gz"))) == 2
+
+
+def test_a_log_archive_goes_to_a_local_target(tmp_path):
+    archive = tmp_path / "stockroom-logs-20260903T000000Z.txt.gz"
+    archive.write_bytes(b"compressed-ish")
+    destination = tmp_path / "usb"
+    destination.mkdir()
+
+    LocalDirTarget(destination, keep=5).store_log(archive)
+
+    assert (destination / archive.name).read_bytes() == b"compressed-ish"
+    assert not list(destination.glob("*.part"))
+
+
+def test_a_local_target_prunes_logs_without_touching_snapshots(tmp_path):
+    destination = tmp_path / "usb"
+    destination.mkdir()
+    (destination / "stockroom-20260901T000000Z.db").write_text("db")
+
+    target = LocalDirTarget(destination, keep=2)
+    for n in range(4):
+        archive = tmp_path / f"stockroom-logs-2026090{n}T000000Z.txt.gz"
+        archive.write_bytes(b"x")
+        target.store_log(archive)
+
+    assert len(sorted(destination.glob("stockroom-logs-*.txt.gz"))) == 2
+    assert (destination / "stockroom-20260901T000000Z.db").exists()
+
+
+def test_the_rclone_target_uploads_and_prunes_logs(tmp_path, fake_rclone):
+    archive = tmp_path / "stockroom-logs-20260903T000000Z.txt.gz"
+    archive.write_bytes(b"x")
+
+    RcloneTarget("gdrive:backups", binary=fake_rclone.binary, keep=30).store_log(archive)
+
+    calls = _calls(fake_rclone)
+    assert (fake_rclone.drive / archive.name).exists()
+    assert any("copyto" in call for call in calls)
+    # It must list LOGS, not snapshots, or a prune would count the wrong files
+    # and could evict database backups to make room for journal exports.
+    assert any("stockroom-logs-*.txt.gz" in call for call in calls)
+    assert not any("stockroom-*.db" in call for call in calls)
+
+
+def test_one_failing_target_does_not_stop_the_log_reaching_the_other(tmp_path):
+    archive = tmp_path / "stockroom-logs-20260903T000000Z.txt.gz"
+    archive.write_bytes(b"x")
+    good = tmp_path / "good"
+    good.mkdir()
+
+    failures = backup_targets.copy_logs_to_targets(
+        archive,
+        [LocalDirTarget(tmp_path / "missing", keep=5),
+         LocalDirTarget(good, keep=5)],
+    )
+
+    assert len(failures) == 1
+    assert (good / archive.name).exists()
+
+
+def test_doctor_notices_an_empty_log_archive(tmp_path, temp_env, monkeypatch):
+    """A ~30-byte gzip of nothing is the group-membership bug, wearing a name."""
+    monkeypatch.setattr(config, "BACKUP_DIR", tmp_path)
+    import gzip
+    with gzip.open(tmp_path / "stockroom-logs-20260903T000000Z.txt.gz", "wt") as h:
+        h.write("")
+
+    check = diagnostics.check_log_archive()
+    assert check.status == diagnostics.FAIL
+    assert "systemd-journal" in check.detail
+
+
+def test_doctor_is_content_with_a_real_log_archive(tmp_path, temp_env, monkeypatch):
+    monkeypatch.setattr(config, "BACKUP_DIR", tmp_path)
+    import gzip
+    with gzip.open(tmp_path / "stockroom-logs-20260903T000000Z.txt.gz", "wt") as h:
+        h.write("a realistic amount of journal " * 100)
+
+    assert diagnostics.check_log_archive().status == diagnostics.OK
