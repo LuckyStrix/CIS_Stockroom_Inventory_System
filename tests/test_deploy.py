@@ -130,11 +130,16 @@ def test_the_nightly_job_always_reaches_the_health_check():
     the diagnosis running.
     """
     commands = _exec_starts("stockroom-backup.service")
-    assert len(commands) == 3, "the nightly job's steps changed; re-read this test"
+    assert len(commands) == 4, "the nightly job's steps changed; re-read this test"
 
-    backup, prune, doctor = commands
+    backup, prune, archive_logs, doctor = commands
     assert backup.startswith("-"), "a failed backup still aborts the whole unit"
     assert prune.startswith("-"), "a failed prune still aborts the whole unit"
+    assert archive_logs.endswith("stockroom archive-logs")
+    assert archive_logs.startswith("-"), (
+        "a journal that cannot be read still aborts the whole unit -- and the "
+        "log archive is exactly the sort of thing that breaks quietly"
+    )
     assert doctor.endswith("stockroom doctor"), "doctor must run last"
     assert not doctor.startswith("-"), (
         "doctor's exit code is what marks the unit failed; leave it unprefixed"
@@ -315,10 +320,68 @@ def test_the_installer_parser_executes_nothing(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_the_journal_is_made_persistent():
+    """Otherwise there is no log to archive, and nobody finds out.
+
+    Raspberry Pi OS ships journald with Storage=auto and no /var/log/journal,
+    which means the journal is volatile and every reboot throws it away. RIT's
+    server standard (3.5) wants two weeks of it. A cap goes with the
+    retention: an unbounded journal on an SD card wears the card out.
+    """
+    body = (_DEPLOY / "harden-pi.sh").read_text()
+    assert "/var/log/journal" in body, "the journal is still volatile"
+    assert "Storage=persistent" in body
+    assert "MaxRetentionSec=" in body
+    assert "SystemMaxUse=" in body, "an uncapped journal fills the card"
+
+
+def test_the_service_account_can_read_the_whole_journal():
+    """The silent half of the log archive.
+
+    journalctl run by a user outside `systemd-journal` prints that user's own
+    empty journal and exits 0, so the nightly export writes a valid archive of
+    nothing every night. The records the standard asks for -- authentication,
+    privilege escalation, account changes -- belong to sshd and sudo, not to
+    this service.
+    """
+    body = (_DEPLOY / "harden-pi.sh").read_text()
+    assert "systemd-journal" in body
+    assert 'usermod -aG systemd-journal "$SERVICE_USER"' in body
+    assert 'SERVICE_USER="${SERVICE_USER:-stockroom}"' in body, (
+        "SERVICE_USER is used but never set, so the usermod is a no-op"
+    )
+
+
+def test_the_sso_directory_is_writable_by_the_account_that_writes_to_it():
+    """A real failure, and a silent one.
+
+    setup-pi.sh runs `stockroom sso init` as the service account, and that
+    command shells out to openssl to write /etc/stockroom/sp.key. The
+    directory was created root-owned 0755, so openssl said "Permission
+    denied" -- and nothing said so out loud: the `|| { ... }` turned it into
+    "not ready yet" and the chmod that followed was `|| true`. Single sign-on
+    silently never got set up on a fresh Pi.
+
+    0750 rather than 0755 because the SAML private key lives in there.
+    """
+    body = (_DEPLOY / "setup-pi.sh").read_text()
+    match = re.search(r"install -d [^\n]*/etc/stockroom\b", body)
+    assert match, "setup-pi.sh no longer creates /etc/stockroom"
+    line = match.group(0)
+    assert '-o "$SERVICE_USER"' in line, line
+    assert "-m 0750" in line, line
+
+
 def test_every_documented_variable_is_one_the_app_reads():
-    """A typo here is invisible: the setting simply never takes effect."""
+    """A typo here is invisible: the setting simply never takes effect.
+
+    The character class has to include digits. Without them this reads
+    STOCKROOM_SSO_REJECT_SHA1 out of config.py as "..._SHA", so a variable
+    that IS read looks undocumented -- the enumeration failing rather than the
+    thing it enumerates, which is the trap `_walk_routes` fell into.
+    """
     config_source = (_ROOT / "src" / "stockroom" / "config.py").read_text()
-    known = set(re.findall(r"STOCKROOM_[A-Z_]+", config_source))
+    known = set(re.findall(r"STOCKROOM_[A-Z0-9_]+", config_source))
     documented = {k for k, _, _ in _assignments(_ENV_EXAMPLE.read_text())}
 
     unknown = documented - known
@@ -643,6 +706,32 @@ def test_the_identity_headers_are_cleared_at_server_level():
         assert f'proxy_set_header {header} "";' in outside, (
             f"{header} is not cleared at server level; a client could send it"
         )
+
+
+def test_the_application_never_reads_an_identity_header():
+    """The other half of the two tests above, enforced in the source.
+
+    nginx blanks X-Shib-* and X-Remote-User so a client cannot send them. That
+    is worth something only while the application would not believe them
+    anyway. Single sign-on is spoken in-process -- see stockroom/saml.py -- so
+    there is no service provider in front of us setting those headers and no
+    reason for any code here to look at one.
+
+    This exists because the tempting shortcut, when SSO is being added, is
+    exactly the one docs/sso-integration.md warns about: read X-Shib-Mail and
+    trust it. On this deployment that is impersonation-as-a-service for
+    anybody on the campus network.
+    """
+    offenders = []
+    for path in sorted((_ROOT / "src" / "stockroom").rglob("*.py")):
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if "X-Shib" in code or "X-Remote-User" in code:
+                offenders.append(f"{path.name}:{number}")
+    assert not offenders, (
+        "these read an identity header the application must not trust: "
+        f"{offenders}"
+    )
 
 
 def test_no_proxying_location_sets_headers_of_its_own():

@@ -32,7 +32,7 @@ AUDITED_MODULES = (service, accounts, requests_service, kits, stocktake)
 
 ACCOUNT_MUTATIONS = {
     "register", "approve", "set_status", "set_role", "change_password",
-    "login", "logout", "revoke_all_sessions",
+    "login", "logout", "revoke_all_sessions", "sso_login", "link_sso",
 }
 
 KIT_MUTATIONS = {
@@ -261,6 +261,18 @@ def test_every_account_mutation_is_audited(conn, actor):
             conn, actor=actor, account_id=subject.id),
         "set_status": lambda: accounts.set_status(
             conn, actor=actor, account_id=subject.id, status="disabled"),
+        # A fresh address, so this cannot be perturbed by -- or perturb --
+        # the set_status entry that disables `subject` at the end. The first
+        # SSO sign-in provisions and signs in, which is two events; the loop
+        # only asks that the count went up.
+        # Deliberate linking of a privileged account, which sso_login refuses
+        # to do on its own. `subject` is a requester here, but the audited
+        # call is the same one an admin makes for a staff account.
+        "link_sso": lambda: accounts.link_sso(
+            conn, actor=actor, account_id=subject.id, sso_uid="link0001"),
+        "sso_login": lambda: accounts.sso_login(
+            conn, actor=actor, sso_uid="zz9999", email="zz9999@rit.edu",
+            first_name="Zoe", last_name="Zimmer", affiliation="Student"),
     }
     assert set(calls) == ACCOUNT_MUTATIONS, "the call table is out of date"
 

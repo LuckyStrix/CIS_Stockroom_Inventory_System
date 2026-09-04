@@ -55,7 +55,7 @@ and `X-Forwarded-For`.
 | **Signup** | Self-service, but the account is `pending` and **cannot sign in** until staff approve it. |
 | **Passwords** | `hashlib.scrypt`, memory-hard, parameters stored per hash so they can be raised later. Minimum 12 characters; common passwords and passwords built from your own name are refused. |
 | **Sessions** | Server-side and revocable. A 256-bit random token in the cookie; only its SHA-256 is stored. |
-| **Cookie** | `__Host-` prefixed under TLS: `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, no `Domain`. |
+| **Cookie** | `__Host-` prefixed under TLS: `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, no `Domain`. Cleared with those same attributes — a `__Host-` deletion without `Secure` is refused by the browser and leaves the cookie in place. |
 | **Timeouts** | 8 hours idle (slides), 7 days absolute (never extends). |
 | **Lockout** | 5 failures per address in 15 minutes; a separate per-IP ceiling (20 in 15 minutes) stops spraying. Stored in the database, so restarting the service does **not** reset it. |
 
@@ -69,6 +69,62 @@ work; raise `security.MAX_FAILURES_PER_IP` if this is ever seen in
 There is deliberately **no way to create an administrator over the network**.
 The first one is made with `stockroom user create --admin` by someone who
 already has shell access to the Pi.
+
+### Single sign-on
+
+`STOCKROOM_AUTH_MODE` selects `password` (the default), `both` or `sso`. Under
+the last two, RIT's Shibboleth identity provider authenticates people and this
+application never sees a password. Full detail in
+[sso-integration.md](sso-integration.md); the security-relevant points:
+
+- **An SSO sign-in produces an ordinary session.** It is not a parallel
+  identity mechanism — `/sso/acs` calls `accounts.sso_login`, which writes the
+  same `session` row the password path writes. Revocation, idle expiry and the
+  absolute cap all work unchanged.
+- **The application never reads `X-Shib-*` or `X-Remote-User`.** SAML is
+  spoken in-process. nginx still blanks those headers, and
+  `test_the_application_never_reads_an_identity_header` fails the build if any
+  code starts reading one. On a campus-reachable host, trusting such a header
+  would let anyone on the network become anyone.
+- **`/sso/acs` is the one POST with no CSRF token**, because it is a
+  cross-site POST from RIT. What replaces it is a signed assertion whose
+  `InResponseTo` names a sign-in this server started, bound by a `HttpOnly`
+  cookie to the browser that started it, single-use, and valid for five
+  minutes. The cookie is the part that stops login CSRF; the signature alone
+  does not, because the assertion is genuinely signed. `deps.CSRF_EXEMPT_PATHS`
+  has exactly one member and a test fails if it grows.
+- **That cookie is `SameSite=None`**, which is the only value that works for a
+  cross-site POST, and therefore **single sign-on requires TLS**. It is worth
+  very little on its own: not the session, one-time, five minutes,
+  `HttpOnly`, and useless without a signed assertion from RIT.
+- **An SSO account has no password.** `password_hash` is empty, and
+  `accounts.login` refuses it after spending the same CPU as a real
+  verification, so this does not become a way to ask who signs in with RIT.
+- **Signing out cannot end the RIT session.** RIT's identity provider
+  publishes no single-logout endpoint, so there is nothing to call. `/logout`
+  ends the stockroom session and `/sso/signed-out` says plainly that the
+  browser is still signed in to RIT. On the shared counter machine this is a
+  real residual risk; the mitigations are a short
+  `STOCKROOM_SESSION_IDLE_HOURS` and closing the browser.
+- **A successful sign-in answers with a page, not a redirect.** The session
+  cookie is `SameSite=Strict`, and a Strict cookie is withheld from every hop
+  of a redirect chain that began cross-site — which RIT's form POST to
+  `/sso/acs` is. The landing page ends the chain on our own origin so the
+  cookie travels. Turning it back into a redirect breaks sign-in in a way no
+  test client can see; see [sso-integration.md](sso-integration.md).
+- **A `staff` or `admin` account is not linked to RIT automatically.** Email
+  matching provisions a requester; it does not confer an existing role, since
+  addresses get reissued and `uid` does not. `stockroom user link-sso` does it
+  deliberately, from a shell, and is audited.
+- **SHA-1 is refused by default.** `STOCKROOM_SSO_REJECT_SHA1="0"` accepts
+  assertions signed with RSA-SHA1, and exists only because RIT's identity
+  provider is old enough that it might still sign that way — see
+  [sso-integration.md](sso-integration.md). It is a real weakening,
+  `stockroom doctor` reports WARN for as long as it is set, and it should be
+  held open only until ITS move to SHA-256.
+- **The escape hatch.** Set `STOCKROOM_AUTH_MODE="password"` and restart.
+  Everyone with a password is back in at once. That is why the password
+  machinery has not been deleted.
 
 ### On account enumeration
 

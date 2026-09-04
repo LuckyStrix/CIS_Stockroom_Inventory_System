@@ -20,7 +20,9 @@ route being added unguarded by accident.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -29,7 +31,7 @@ from fastapi import Depends, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import accounts, config, db, security, service
+from .. import accounts, config, db, saml, security, service
 from ..accounts import Account
 from ..service import Actor
 
@@ -69,8 +71,31 @@ PUBLIC_PATHS = frozenset({
     # whose path merely starts with those seven characters.
     "/public",
     "/openapi.json", "/api/docs", "/redoc", "/docs/oauth2-redirect",
+    # Single sign-on. Listed one by one rather than as a "/sso/" prefix for
+    # the same reason "/public" is: a prefix would also exempt any future
+    # route whose path merely starts with those characters.
+    "/sso/login", "/sso/acs", "/sso/metadata", "/sso/signed-out",
 })
 PUBLIC_PREFIXES = ("/static/", "/public/")
+
+# The one path whose CSRF token is REPLACED by something stronger, not simply
+# dropped. /sso/acs is a top-level cross-site form POST from RIT's identity
+# provider, which has never seen our token and cannot send one.
+#
+# What stands in for it is in security.consume_saml_handshake: a signed
+# assertion whose InResponseTo names a sign-in this server started, bound by a
+# cookie to the browser that started it, single-use, and valid for five
+# minutes. That is stronger than the token it replaces -- an attacker can put
+# any value in a form field, but cannot forge RIT's signature.
+#
+# Nothing else belongs in here. test_the_csrf_exemption_is_exactly_one_path
+# fails if the set grows, so adding to it is a decision somebody has to make
+# on purpose.
+CSRF_EXEMPT_PATHS = frozenset({"/sso/acs"})
+
+
+def is_csrf_exempt(path: str) -> bool:
+    return path in CSRF_EXEMPT_PATHS
 
 
 def is_public_path(path: str) -> bool:
@@ -116,11 +141,89 @@ def set_session_cookie(response, request: Request, token: str) -> None:
     )
 
 
+# Deleting a cookie is setting one, so the deletion has to satisfy the same
+# rules the original did. A `__Host-` name is REFUSED by the browser unless
+# the Set-Cookie carries Secure and Path=/ -- and Starlette's delete_cookie
+# defaults to secure=False, so the deletion was being thrown away and the
+# cookie stayed in the jar. Nothing was left unrevoked (the session row is
+# deleted server-side either way), but "Sign out" did not remove the cookie
+# it said it removed.
+#
+# The plain names are deleted without Secure, because on plain HTTP a Secure
+# deletion is the one that gets ignored. So each name is cleared the way it
+# was set.
+def _delete_cookie(response, name: str, *, secure: bool, samesite: str) -> None:
+    response.delete_cookie(
+        name, path="/", secure=secure, httponly=True, samesite=samesite
+    )
+
+
 def clear_session_cookie(response, request: Request) -> None:
-    for name in (SESSION_COOKIE_SECURE, SESSION_COOKIE_PLAIN):
-        response.delete_cookie(name, path="/")
-    # Drop the anonymous token too, so the next sign-in starts clean.
+    _delete_cookie(response, SESSION_COOKIE_SECURE, secure=True, samesite="strict")
+    _delete_cookie(response, SESSION_COOKIE_PLAIN, secure=False, samesite="strict")
+    # Drop the anonymous token too, so the next sign-in starts clean. Not
+    # `__Host-` prefixed and not HttpOnly-critical, but cleared consistently.
     response.delete_cookie(CSRF_COOKIE, path="/")
+
+
+# The browser half of what replaces the CSRF token on /sso/acs. A nonce goes
+# out in this cookie and its hash is stored on the handshake row; only a
+# browser that shows the nonce can spend the handshake.
+SAML_STATE_COOKIE_SECURE = "__Host-stockroom_saml"
+SAML_STATE_COOKIE_PLAIN = "stockroom_saml"
+
+
+def saml_cookie_name(request: Request) -> str:
+    return (
+        SAML_STATE_COOKIE_SECURE if _is_secure(request) else SAML_STATE_COOKIE_PLAIN
+    )
+
+
+def set_saml_state_cookie(response, request: Request, token: str) -> None:
+    """Remember, in this browser, that this browser started this sign-in.
+
+    SameSite=None, and that is not a loosening -- it is the only value that
+    works. The identity provider replies with a top-level cross-site POST,
+    and a Lax cookie is only sent on a cross-site request that is a
+    *navigation with a safe method*. Lax here would mean the cookie never
+    arrives and every single sign-in fails. Strict is worse still.
+
+    None requires Secure, so single sign-on requires TLS. That is fine in the
+    stockroom, which is https-only, and it is why plain HTTP falls back to
+    Lax and the unprefixed name -- enough for the test client, and for
+    nothing else.
+
+    What bounds the risk of a cross-site-readable cookie is that it is worth
+    almost nothing: it is not the session, it is one-time, it expires in
+    minutes, and the only thing it can do is finish one specific pending
+    sign-in that also needs a signed assertion from RIT.
+    """
+    secure = _is_secure(request)
+    response.set_cookie(
+        saml_cookie_name(request),
+        token,
+        max_age=config.SSO_HANDSHAKE_TTL_SECONDS,
+        httponly=True,
+        secure=secure,
+        samesite="none" if secure else "lax",
+        path="/",
+    )
+
+
+def saml_state_token(request: Request) -> str:
+    return (
+        request.cookies.get(SAML_STATE_COOKIE_SECURE)
+        or request.cookies.get(SAML_STATE_COOKIE_PLAIN)
+        or ""
+    )
+
+
+def clear_saml_state_cookie(response, request: Request) -> None:
+    # SameSite=None on the secure name, matching how it was set: None without
+    # Secure is refused outright, and a `__Host-` name without Secure is
+    # refused too. See _delete_cookie.
+    _delete_cookie(response, SAML_STATE_COOKIE_SECURE, secure=True, samesite="none")
+    _delete_cookie(response, SAML_STATE_COOKIE_PLAIN, secure=False, samesite="lax")
 
 
 def session_token(request: Request) -> str:
@@ -268,6 +371,59 @@ def require_admin(request: Request) -> Account:
     if not account.is_admin:
         raise Forbidden("That action is limited to administrators.")
     return account
+
+
+@dataclass(frozen=True, slots=True)
+class SsoSignIn:
+    """A validated assertion, and where the person was trying to go."""
+
+    assertion: "saml.Assertion"
+    return_to: str
+
+
+def require_saml_handshake(
+    request: Request, *, saml_response: str, relay_state: str
+) -> SsoSignIn:
+    """Everything /sso/acs must be sure of before it does anything at all.
+
+    This is the control that stands in for the CSRF token on that route (see
+    CSRF_EXEMPT_PATHS). It is named `require_*` deliberately: the AST check in
+    test_no_route_does_work_before_its_permission_check finds any call whose
+    name starts with that and insists it be the handler's first statement, so
+    the compensating control is held in first position by an invariant that
+    already existed, rather than by a comment asking nicely.
+
+    Order is deliberate. The browser binding is checked and spent first, then
+    the signature. Nothing parses attacker-supplied XML until we know this
+    browser asked for it.
+
+    Every failure is the same 403. The real reason goes to the log, where an
+    administrator can see it and a prober cannot.
+    """
+    logger = logging.getLogger(__name__)
+
+    if not saml_response:
+        logger.warning("SSO: a POST reached /sso/acs with no SAMLResponse")
+        raise Forbidden("That sign-in could not be completed. Please try again.")
+
+    conn = get_conn()
+    try:
+        handshake = security.consume_saml_handshake(
+            conn, state_token=saml_state_token(request), relay_state=relay_state
+        )
+    except security.HandshakeError as exc:
+        logger.warning("SSO: handshake refused: %s", exc)
+        raise Forbidden("That sign-in could not be completed. Please try again.")
+
+    try:
+        assertion = saml.parse_response(
+            saml_response=saml_response, request_id=handshake.request_id
+        )
+    except saml.SamlError as exc:
+        logger.warning("SSO: assertion refused: %s", exc)
+        raise Forbidden("That sign-in could not be completed. Please try again.")
+
+    return SsoSignIn(assertion=assertion, return_to=safe_path(handshake.return_to))
 
 
 # FastAPI dependency forms, so a route's permissions show up in its signature.
@@ -421,8 +577,18 @@ def login_url(target: str) -> str:
 
     Encoding here means the destination survives intact and cannot smuggle a
     parameter, whatever it contains.
+
+    Under STOCKROOM_AUTH_MODE=sso this points at the identity provider hop
+    instead. Keeping that decision here means the deny-by-default gate in
+    app.require_authentication, the _LoginRedirect handler and every template
+    follow it without knowing about it -- there is one seam, not four. The
+    mode is read per call, never bound at import, so a restart is all it takes
+    to change it and a test can monkeypatch it.
     """
-    return f"/login?next={quote(safe_path(target), safe='/')}"
+    encoded = quote(safe_path(target), safe="/")
+    if config.AUTH_MODE == "sso":
+        return f"/sso/login?next={encoded}"
+    return f"/login?next={encoded}"
 
 
 def redirect(path: str, *, ok: str = "", error: str = "") -> RedirectResponse:
@@ -464,6 +630,8 @@ def page(request: Request, template: str, **context):
             "summary": service.summary(conn),
             "pending_requests": pending_requests,
             "pending_accounts": pending_accounts,
+            "auth_mode": config.AUTH_MODE,
+            "sign_in_url": login_url(request.url.path),
             **context,
         },
     )

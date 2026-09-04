@@ -16,6 +16,12 @@ dependencies = [
     "Pillow>=10",
 ]
 
+# Single sign-on is opt-in. python3-saml pulls in lxml and xmlsec, which are
+# native extensions -- a normal install on a Pi should not pay for them, and
+# the application starts and runs without them (config.AUTH_MODE=password).
+[project.optional-dependencies]
+sso = ["python3-saml>=1.16"]
+
 [project.scripts]
 stockroom = "stockroom.cli:main"
 

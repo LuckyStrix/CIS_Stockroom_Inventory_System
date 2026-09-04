@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Signed out{% endblock %}
+{% block content %}
+<div class="narrow">
+  <h1>Signed out of the stockroom</h1>
+
+  {# This page exists to tell the truth about something a "Signed out" flash
+     on the sign-in page would quietly misrepresent. RIT's identity provider
+     publishes no SingleLogoutService, so there is no way for this application
+     to end the RIT session -- and under single sign-on, going back to /login
+     would hand the browser straight back to an identity provider that still
+     recognises it, signing the person back in without a prompt. #}
+
+  <div class="card">
+    <p>Your stockroom session has ended and its cookie has been deleted.</p>
+    <p><strong>You are still signed in to RIT.</strong> RIT provides no way for
+      this application to end that session, so anyone using this browser can
+      return to the stockroom without typing a password.</p>
+    <p><strong>On a shared machine &mdash; the counter, a lab computer &mdash;
+      close every browser window now.</strong> That is what finishes signing
+      out.</p>
+  </div>
+
+  <p class="muted center"><a href="/sso/login">Sign in again</a></p>
+</div>
+{% endblock %}

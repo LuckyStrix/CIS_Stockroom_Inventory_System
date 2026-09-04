@@ -19,6 +19,41 @@ plain about:
   decisions on requests. Staff work the inbox; requesters check
   `/requests/mine`. Tell people that when you approve them.
 
+### Once RIT single sign-on is turned on
+
+Both of those change. RIT proves the address belongs to the person, so
+approval stops being the verification step and becomes a decision about
+access — which is why a first sign-in creates a working `requester` account
+straight away unless `STOCKROOM_SSO_AUTO_APPROVE="0"` says otherwise.
+
+Nobody re-registers — with one deliberate exception. A `requester` account is
+matched by RIT's `mail` attribute on its owner's first RIT sign-in and lights
+up with its history and its person record intact.
+
+**A `staff` or `admin` account is not**, and is refused until somebody links
+it by hand:
+
+```bash
+sudo -u stockroom stockroom user link-sso alice@rit.edu abc1234
+```
+
+An email match is enough to provision a new requester and not enough to
+inherit a role that can write equipment off: RIT reissue addresses after
+people leave, which is exactly why `uid` and not `mail` is the account's
+primary key. So promoting an identity into a privileged account is a decision
+a human makes from a shell on the Pi — the same reasoning as "there is
+deliberately no way to create an administrator over the network".
+
+Do the linking **before** the migration term starts, not during it. There are
+only a handful of staff accounts, `stockroom user list` shows them, and the
+`uid` is the part of an RIT address before the `@`.
+
+Single sign-on is off until ITS have registered the service — see
+[its-registration.md](its-registration.md). It is switched on with
+`STOCKROOM_AUTH_MODE` in `/etc/stockroom.env` (`both` during a migration
+term, then `sso`), and switched off again the same way if anything goes
+wrong.
+
 ### The first administrator
 
 Made from a shell on the Pi. There is deliberately no way to do it over the

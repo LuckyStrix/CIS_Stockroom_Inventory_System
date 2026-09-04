@@ -678,3 +678,35 @@ def test_an_unset_allow_list_follows_the_hostname():
     host = socket.gethostname().split(".")[0].lower()
     assert _allowed_hosts("") == _allowed_hosts("   ") == [
         host, f"{host}.local", "localhost", "127.0.0.1", "::1", "testserver"]
+
+
+def test_signing_out_actually_removes_the_cookie_it_says_it_removes(client):
+    """Deleting a cookie is setting one, and the same rules apply.
+
+    A `__Host-` prefixed name is refused by the browser unless the Set-Cookie
+    carries Secure -- and Starlette's delete_cookie defaults to secure=False,
+    so the deletion was being thrown away and the cookie stayed in the jar.
+    Nothing was left unrevoked, because the session row goes either way, but
+    "Sign out" did not do the visible half of what it said.
+
+    Both names are cleared, each the way it was set: the `__Host-` one with
+    Secure, the plain one without, because on plain HTTP it is the Secure
+    deletion that gets ignored.
+    """
+    token = csrf(client, "/")
+    response = client.post("/logout", data={"_csrf": token},
+                           follow_redirects=False)
+    assert response.status_code == 303
+
+    cleared = {}
+    for header in response.headers.get_list("set-cookie"):
+        name = header.split("=", 1)[0]
+        cleared[name] = header
+
+    host_cookie = cleared["__Host-stockroom_session"]
+    assert "Max-Age=0" in host_cookie or "expires=" in host_cookie.lower()
+    assert "Secure" in host_cookie, host_cookie
+    assert "Path=/" in host_cookie, host_cookie
+
+    plain = cleared["stockroom_session"]
+    assert "Secure" not in plain, plain

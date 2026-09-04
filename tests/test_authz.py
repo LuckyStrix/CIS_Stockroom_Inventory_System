@@ -113,19 +113,54 @@ def requester_client(app, requester):
 # ---------------------------------------------------------------------------
 
 
+def _walk_routes(routes):
+    """Yield (method, path, endpoint) for every route, however it is nested.
+
+    An included router is not a plain list of routes. FastAPI wraps each
+    `include_router` call in a `_IncludedRouter`, which has no `.path` and --
+    the trap -- no `.routes` either: the real ones hang off
+    `.original_router`. Reading `.routes` with a `[]` default therefore
+    walked straight past all seventy-eight of this application's router
+    routes and returned only the dozen declared on `app` itself, so the two
+    enumerating tests below passed by finding nothing to check.
+
+    `_route_count_is_sane` guards the traversal itself, because a walk that
+    silently returns too little is exactly how the guarantee was lost.
+    """
+    for route in routes:
+        nested = getattr(route, "routes", None)
+        if nested is None:
+            included = getattr(route, "original_router", None)
+            nested = getattr(included, "routes", None) if included else None
+        if getattr(route, "path", None) is None:
+            yield from _walk_routes(nested or [])
+            continue
+        for method in getattr(route, "methods", set()) or set():
+            yield method, route.path, getattr(route, "endpoint", None)
+
+
 def _app_routes(app):
     """Every (method, path) the application serves, flattened."""
-    found = []
-    for route in app.routes:
-        path = getattr(route, "path", None)
-        if path is None:
-            for sub in getattr(route, "routes", []) or []:
-                for method in getattr(sub, "methods", set()) or set():
-                    found.append((method, sub.path))
-        else:
-            for method in getattr(route, "methods", set()) or set():
-                found.append((method, path))
-    return found
+    return [(method, path) for method, path, _ in _walk_routes(app.routes)]
+
+
+def test_the_route_walk_actually_finds_the_routes(app):
+    """The enumerating tests are only worth anything if the walk works.
+
+    They assert that nothing in a list is unguarded, so an empty list passes
+    them. It did: `_app_routes` quietly returned 13 routes out of ~90 for as
+    long as FastAPI has wrapped included routers, and every route in every
+    `routes_*.py` module went unchecked. A count is a blunt instrument, but
+    it fails loudly when the traversal stops seeing the application.
+    """
+    found = _app_routes(app)
+    paths = {path for _, path in found}
+    assert len(found) > 80, f"the walk found only {len(found)} routes: {sorted(paths)}"
+    # A route from each router, so a partial traversal is caught too.
+    for path in ("/items/new", "/loans", "/counter", "/kits", "/stocktake",
+                 "/accounts", "/people", "/history", "/reports", "/requests",
+                 "/login", "/publish", "/sso/login"):
+        assert path in paths, f"{path} is missing from the walked route table"
 
 
 def _concrete(path: str) -> str:
@@ -157,7 +192,19 @@ def test_every_route_is_either_public_or_requires_a_login(app, temp_env):
 
 
 def test_every_post_route_rejects_a_missing_csrf_token(app, requester_client):
-    """A signed-in session is not enough; the token must be present."""
+    """A signed-in session is not enough; the token must be present.
+
+    There is no exemption list here, deliberately, even though one POST route
+    -- /sso/acs -- does not check a CSRF token. It cannot: it is a cross-site
+    form POST from RIT's identity provider, which has never seen our token.
+    It reaches the same 403 by a different and stronger route, refusing any
+    request that does not carry an assertion answering a sign-in this browser
+    started. So this test is unchanged and still means exactly what it says.
+
+    What replaces the token there is proved in tests/test_sso.py; that the
+    exemption is exactly one path is proved by
+    test_the_csrf_exemption_is_exactly_one_path.
+    """
     unprotected = []
     for method, path in _app_routes(app):
         if method != "POST":
@@ -168,6 +215,23 @@ def test_every_post_route_rejects_a_missing_csrf_token(app, requester_client):
         if response.status_code != 403:
             unprotected.append(f"POST {path} -> {response.status_code}")
     assert not unprotected, "these POST routes accepted a request with no CSRF token: " + str(unprotected)
+
+
+def test_the_csrf_exemption_is_exactly_one_path():
+    """One route may skip the token check. Exactly one, and on purpose.
+
+    /sso/acs cannot carry a CSRF token -- it is a cross-site form POST from
+    RIT's identity provider, which has never seen ours. What stands in for it
+    is a signed assertion answering a sign-in this browser started, single-use
+    and five minutes long; tests/test_sso.py proves each of those, including
+    that an assertion bound to a different browser is refused.
+
+    This test exists so that widening the exemption is a decision somebody has
+    to make and write down, rather than a line that quietly grows. If it
+    fails, the question to answer is not "how do I make this pass" but "what
+    replaces the token on the path I just added".
+    """
+    assert deps.CSRF_EXEMPT_PATHS == frozenset({"/sso/acs"})
 
 
 def test_a_wrong_csrf_token_is_rejected(requester_client):
@@ -237,6 +301,201 @@ def test_a_requester_cannot_change_inventory(requester_client, conn, admin):
     )
     assert response.status_code == 403
     assert not service.get_item(conn, item.id).is_archived
+
+
+def _staff_only_routes(app):
+    """Every (method, path) whose handler asks for staff or admin.
+
+    Read off the handlers themselves rather than from a list kept by hand,
+    for the same reason the two enumerating tests above walk the route table:
+    a list maintained separately from the code drifts, and the drift is
+    invisible. `require_staff` and `require_admin` are called in the body
+    rather than declared as dependencies, so the source is where the answer
+    is.
+    """
+    import inspect
+
+    found = []
+    for method, path, endpoint in _walk_routes(app.routes):
+        if method not in ("GET", "POST") or endpoint is None:
+            continue
+        try:
+            source = inspect.getsource(endpoint)
+        except (OSError, TypeError):  # pragma: no cover - not a Python handler
+            continue
+        if "require_staff(" in source or "require_admin(" in source:
+            found.append((method, path))
+    return found
+
+
+def test_every_staff_only_route_refuses_a_requester(app, requester_client, conn, admin):
+    """The role boundary, enforced over the whole route table.
+
+    `test_a_requester_cannot_reach_staff_pages` names thirteen paths; this
+    finds every route that asks for staff, GET and POST alike, and proves a
+    requester is turned away from all of them. A CSRF token is supplied, so a
+    403 here is an authorisation refusal and not the CSRF gate firing first.
+    """
+    service.create_item(conn, actor=admin.as_actor(), name="Camera", quantity=2)
+    token = csrf(requester_client, "/")
+
+    staff_only = _staff_only_routes(app)
+    # If this ever comes back empty the test is passing vacuously.
+    assert len(staff_only) > 40, f"only found {len(staff_only)} staff routes"
+
+    # 403 is the guard refusing. 422 is FastAPI rejecting the form body before
+    # the handler runs at all, which happens on the staff POSTs that have
+    # required fields -- this test sends none of them. Both are refusals and
+    # neither reaches the service layer, and
+    # `test_no_route_does_work_before_its_permission_check` is what makes the
+    # second one safe rather than merely lucky.
+    leaked = []
+    for method, path in staff_only:
+        response = requester_client.request(
+            method, _concrete(path), data={"_csrf": token}, follow_redirects=False
+        )
+        if response.status_code not in (403, 422):
+            leaked.append(f"{method} {path} -> {response.status_code}")
+    assert not leaked, "a requester was not refused by these staff routes: " + str(leaked)
+
+
+def test_no_route_does_work_before_its_permission_check():
+    """A handler's permission check must be the first thing it does.
+
+    Permissions are checked in the body here, not declared as dependencies,
+    so "is it guarded?" and "is it guarded *before* anything happens?" are
+    two different questions and only the first is visible in a route listing.
+    A read, a write or a service call above the guard would run for a caller
+    who is about to be refused.
+
+    Docstrings and local imports are allowed above it; nothing else is.
+    """
+    import ast
+    import pathlib
+
+    web = pathlib.Path(__file__).resolve().parent.parent / "src" / "stockroom" / "web"
+    offenders = []
+    checked = 0
+    for source_file in sorted(web.glob("routes_*.py")) + [web / "app.py"]:
+        tree = ast.parse(source_file.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any(
+                isinstance(d, ast.Call)
+                and isinstance(d.func, ast.Attribute)
+                and getattr(d.func.value, "id", "") in ("router", "app")
+                for d in node.decorator_list
+            ):
+                continue
+            guard_at = None
+            for index, statement in enumerate(node.body):
+                if any(
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Name)
+                    and sub.func.id.startswith("require_")
+                    for sub in ast.walk(statement)
+                ):
+                    guard_at = index
+                    break
+            if guard_at is None:
+                continue          # public route; the enumerating tests cover it
+            checked += 1
+            for statement in node.body[:guard_at]:
+                if isinstance(statement, ast.Expr) and isinstance(
+                    statement.value, ast.Constant
+                ):
+                    continue      # docstring
+                if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                    continue
+                offenders.append(f"{source_file.name}:{node.name}")
+                break
+
+    assert checked > 60, f"only inspected {checked} guarded handlers"
+    assert not offenders, "these handlers act before checking permission: " + str(offenders)
+
+
+def _links_on(html: str) -> set[str]:
+    """Local paths a browser would follow or submit to on this page."""
+    found = set()
+    for match in re.finditer(r'(?:href|action)="(/[^"#]*)"', html):
+        target = match.group(1).split("?")[0].rstrip("/") or "/"
+        found.add(target)
+    return found
+
+
+def test_no_page_a_requester_can_see_links_to_a_staff_page(
+    requester_client, conn, admin, requester
+):
+    """Every link and form on a requester's pages must lead somewhere they may go.
+
+    A control that 403s is not a security hole -- the route refuses it -- but
+    it is a broken page, and it is the symptom of the real bug: item_detail
+    once rendered the whole staff console, borrower names and email addresses
+    included, to anyone signed in. The route withholds that data now. This
+    walks what a requester can actually reach and follows every link it
+    finds, so the next staff control dropped into a shared template fails
+    here rather than in front of a student.
+    """
+    from stockroom import requests_service
+
+    item = service.create_item(
+        conn, actor=admin.as_actor(), name="Camera", quantity=2, tracked=True
+    )
+    service.checkout(
+        conn, actor=admin.as_actor(), item_id=item.id,
+        person_email="victim@rit.edu", person_name="Victim Person", quantity=1,
+    )
+    mine = requests_service.submit_new_item(
+        conn, actor=requester.as_actor(), requester_id=requester.id, name="A gel kit"
+    )
+
+    start = [
+        "/", "/items", f"/items/{item.id}", "/account", "/requests/mine",
+        f"/requests/{mine.id}", "/requests/new/borrow", "/requests/new/new_item",
+        "/requests/new/open_hours",
+    ]
+
+    broken = []
+    for path in start:
+        page_response = requester_client.get(path, follow_redirects=False)
+        assert page_response.status_code == 200, f"{path} -> {page_response.status_code}"
+        for target in _links_on(page_response.text):
+            if deps.is_public_path(target) or target.startswith("/static"):
+                continue
+            followed = requester_client.get(target, follow_redirects=False)
+            if followed.status_code == 403:
+                broken.append(f"{path} links to {target}")
+    assert not broken, "requester pages link to staff-only pages: " + str(broken)
+
+
+def test_an_item_page_does_not_show_a_requester_who_has_one(
+    requester_client, staff_client, conn, admin
+):
+    """Borrower identity is staff-only, on the page as well as in the payload.
+
+    The public page omits borrowers unless PUBLIC_SHOW_BORROWERS is turned on
+    (see publish/render.py); a signed-in requester is not a reason to be
+    laxer than the page pinned on the corridor wall. The borrower datalist on
+    this page was every email address the stockroom holds.
+    """
+    item = service.create_item(
+        conn, actor=admin.as_actor(), name="Camera", quantity=2, tracked=True
+    )
+    service.checkout(
+        conn, actor=admin.as_actor(), item_id=item.id,
+        person_email="victim@rit.edu", person_name="Victim Person", quantity=1,
+    )
+
+    body = requester_client.get(f"/items/{item.id}").text
+    assert body.count("Camera"), "the requester should still see the item itself"
+    assert "victim@rit.edu" not in body
+    assert "Victim Person" not in body
+
+    # Staff still get the whole picture -- this is a split, not a removal.
+    staff_body = staff_client.get(f"/items/{item.id}").text
+    assert "victim@rit.edu" in staff_body
+    assert "Victim Person" in staff_body
 
 
 def test_only_an_admin_can_change_roles(staff_client, requester_client, conn, requester):

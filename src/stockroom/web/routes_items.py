@@ -131,35 +131,52 @@ def create_item(
 
 @router.get("/items/{item_id}", response_class=HTMLResponse)
 def item_detail(request: Request, item_id: int):
-    require_account(request)
+    """One item. Requesters see the shelf; staff see the paperwork.
+
+    A requester can reach this page -- browsing the catalogue is how they
+    decide what to ask for -- so the staff half is withheld *here* rather
+    than only hidden in the template. The two are not the same thing: a
+    template hides a control, but the route decides whether the data was
+    ever rendered into the page at all. Every field below the split names a
+    person -- the borrower datalist is every email address the stockroom
+    holds, the loan tables are who has what right now -- and "who had it"
+    is the stockroom's business, not the next requester's. This mirrors
+    routes_requests.request_detail, which withholds `overlaps` for the
+    same reason.
+    """
+    account = require_account(request)
     conn = get_conn()
     from .. import db
 
     item = service.get_item(conn, item_id)
-    loans = service.list_loans(conn, item_id=item_id)
-    units = service.list_units(conn, item_id=item_id) if item.is_tracked else []
-    return page(
-        request,
-        "item_detail.html",
+    context = dict(
         item=item,
-        open_loans=[l for l in loans if l.is_open],
-        past_loans=[l for l in loans if not l.is_open][:40],
-        people=service.list_people(conn),
         photos=service.list_photos(conn, item_id),
-        kits_using=kits.kits_containing(conn, item_id),
-        holds=service.list_holds(conn, item_id=item_id, open_only=True),
-        past_holds=service.list_holds(conn, item_id=item_id, open_only=False)[:20],
-        units=units,
-        # Only units that can actually go out of the door: sound, still
-        # owned, and not already in somebody's bag. is_available covers the
-        # first two -- it is the question the condition machinery asks -- and
-        # would happily offer a camera that is already lent out.
-        lendable_units=[u for u in units if u.is_lendable],
-        hold_states=HOLD_STATE_LABELS,
         barcode_svg=barcodes.render_svg(item.barcode) if item.barcode else "",
         now=db.utcnow(),
         next_url=f"/items/{item_id}",
     )
+
+    if account.is_staff:
+        loans = service.list_loans(conn, item_id=item_id)
+        units = service.list_units(conn, item_id=item_id) if item.is_tracked else []
+        context.update(
+            open_loans=[l for l in loans if l.is_open],
+            past_loans=[l for l in loans if not l.is_open][:40],
+            people=service.list_people(conn),
+            kits_using=kits.kits_containing(conn, item_id),
+            holds=service.list_holds(conn, item_id=item_id, open_only=True),
+            past_holds=service.list_holds(conn, item_id=item_id, open_only=False)[:20],
+            units=units,
+            # Only units that can actually go out of the door: sound, still
+            # owned, and not already in somebody's bag. is_available covers the
+            # first two -- it is the question the condition machinery asks --
+            # and would happily offer a camera that is already lent out.
+            lendable_units=[u for u in units if u.is_lendable],
+            hold_states=HOLD_STATE_LABELS,
+        )
+
+    return page(request, "item_detail.html", **context)
 
 
 @router.get("/items/{item_id}/edit", response_class=HTMLResponse)

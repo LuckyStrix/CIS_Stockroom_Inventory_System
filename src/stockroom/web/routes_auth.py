@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
-from .. import accounts, security
+from .. import accounts, config, security
 from ..service import ConflictError, StockroomError, ValidationError
 from .deps import (
     clear_session_cookie,
@@ -28,6 +30,11 @@ router = APIRouter()
 def login_form(request: Request, next: str = "/"):
     if current_account(request) is not None:
         return redirect(safe_path(next))
+    if config.AUTH_MODE == "sso":
+        # There is no password form to show. Kept as a route rather than
+        # deleted so that every bookmark, every link in the documentation and
+        # deps.login_url's fallback all still land somewhere sensible.
+        return redirect(f"/sso/login?next={quote(safe_path(next), safe='/')}")
     return page(request, "login.html", next_url=safe_path(next))
 
 
@@ -70,7 +77,11 @@ def logout(request: Request):
     token = session_token(request)
     if token:
         accounts.logout(get_conn(), token=token)
-    response = redirect("/login", ok="Signed out.")
+    # Under single sign-on, "/login" would forward to RIT, RIT would still
+    # recognise the browser, and the person would be signed straight back in
+    # -- so Sign out would appear to do nothing. See sso_signed_out.html.
+    target = "/sso/signed-out" if config.AUTH_MODE == "sso" else "/login"
+    response = redirect(target, ok="Signed out.")
     clear_session_cookie(response, request)
     return response
 

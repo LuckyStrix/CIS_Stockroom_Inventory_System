@@ -32,9 +32,25 @@ Environment variables (all optional):
     STOCKROOM_BACKUP_REMOTE           rclone remote, e.g. "gdrive:stockroom"
     STOCKROOM_RCLONE                  path to the rclone binary
     STOCKROOM_BACKUP_REMOTE_KEEP      snapshots to keep on the remote
+    STOCKROOM_LOG_ARCHIVE_DAYS        days of journal in each nightly export
+    STOCKROOM_LOG_ARCHIVE_KEEP        log archives to keep, locally and off-box
+    STOCKROOM_JOURNALCTL              path to the journalctl binary
     STOCKROOM_PHOTO_DIR               where uploaded item photos are stored
     STOCKROOM_PHOTO_MAX_PIXELS        longest edge after downscaling (1600)
     STOCKROOM_MAX_UPLOAD_BYTES        reject a request body larger than this
+    STOCKROOM_AUTH_MODE               "password" (default), "sso" or "both"
+    STOCKROOM_SSO_BASE_URL            the SP's own https:// origin, e.g.
+                                      https://cisstockroom.device.rit.edu
+    STOCKROOM_SSO_ENTITY_ID           default <base>/shibboleth
+    STOCKROOM_SSO_IDP_METADATA        cached copy of RIT's rit-metadata.xml
+    STOCKROOM_SSO_SP_CERT             the SP certificate (PEM)
+    STOCKROOM_SSO_SP_KEY              the SP private key (PEM)
+    STOCKROOM_SSO_AUTO_APPROVE        "0" to make a new SSO account wait for
+                                      staff approval (default: active at once)
+    STOCKROOM_SSO_HANDSHAKE_TTL       seconds a started sign-in stays valid (300)
+    STOCKROOM_SSO_SIGN_REQUESTS       sign our AuthnRequests (default "1")
+    STOCKROOM_SSO_ENCRYPTED_ASSERTIONS "1" to REFUSE an unencrypted assertion
+    STOCKROOM_SSO_REJECT_SHA1         "0" only if RIT's IdP still signs SHA-1
 """
 
 from __future__ import annotations
@@ -297,6 +313,29 @@ BACKUP_REMOTE: str = os.environ.get("STOCKROOM_BACKUP_REMOTE", "").strip()
 RCLONE: str = os.environ.get("STOCKROOM_RCLONE", "rclone")
 BACKUP_REMOTE_KEEP: int = int(os.environ.get("STOCKROOM_BACKUP_REMOTE_KEEP", "30"))
 
+# ---------------------------------------------------------------------------
+# Getting the system log off the machine
+#
+# RIT's Server Security Standard asks (3.5) for at least two weeks of
+# authentication, privilege-escalation, account-change and job-start-up
+# logging, and (3.7) for it to be mirrored in real time onto another secure
+# server. deploy/harden-pi.sh makes the journal persistent, which answers the
+# first. The second wants a log server this deployment does not have.
+#
+# What happens instead: the nightly job exports a window of the journal and
+# ships it to the same off-box targets the database snapshot goes to. That is
+# NOT 3.7 -- it is a night behind, not real time -- and calling it that on a
+# checklist would be a lie. It is what makes the log survive the SD card,
+# which is the risk that actually kills this machine.
+#
+# The window overlaps on purpose. A nightly export of "the last two days",
+# kept 30 deep, tolerates a night the Pi was switched off without leaving a
+# hole; an export of exactly one day does not.
+# ---------------------------------------------------------------------------
+LOG_ARCHIVE_DAYS: int = int(os.environ.get("STOCKROOM_LOG_ARCHIVE_DAYS", "2"))
+LOG_ARCHIVE_KEEP: int = int(os.environ.get("STOCKROOM_LOG_ARCHIVE_KEEP", "30"))
+JOURNALCTL: str = os.environ.get("STOCKROOM_JOURNALCTL", "journalctl")
+
 # How long a pending request or signup may sit before it is flagged as stale.
 # There is no email server, so nothing chases anyone: a request is only worked
 # if a human sees it waiting. This is what turns "waiting" into "waiting too
@@ -307,3 +346,119 @@ REQUEST_STALE_DAYS: int = int(os.environ.get("STOCKROOM_REQUEST_STALE_DAYS", "3"
 # cap never does.
 SESSION_IDLE_HOURS: int = int(os.environ.get("STOCKROOM_SESSION_IDLE_HOURS", "8"))
 SESSION_MAX_DAYS: int = int(os.environ.get("STOCKROOM_SESSION_MAX_DAYS", "7"))
+
+
+# ---------------------------------------------------------------------------
+# Single sign-on
+#
+# Three modes, because the RIT registration is a request to another team and
+# cannot be scheduled:
+#
+#   password  what this has always done. The default, and what runs until ITS
+#             has registered the service provider.
+#   both      the RIT button and the password form side by side. What a
+#             migration term looks like.
+#   sso       RIT only. /login sends you to the identity provider.
+#
+# An unrecognised value falls back to "password" rather than refusing to
+# start. A typo in /etc/stockroom.env must not lock the whole stockroom out of
+# its own inventory; the wrong sign-in page is recoverable, a service that
+# will not boot at 9am on a Monday is not.
+# ---------------------------------------------------------------------------
+AUTH_MODES = ("password", "sso", "both")
+
+
+def _load_auth_mode(raw: str) -> str:
+    mode = (raw or "").strip().lower() or "password"
+    if mode not in AUTH_MODES:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "STOCKROOM_AUTH_MODE=%r is not one of %s; falling back to 'password'",
+            raw, ", ".join(AUTH_MODES),
+        )
+        return "password"
+    return mode
+
+
+AUTH_MODE: str = _load_auth_mode(os.environ.get("STOCKROOM_AUTH_MODE", ""))
+
+# The SP's own origin. Every absolute URL SAML needs -- the entityID, the
+# assertion consumer service, the Destination and Recipient the toolkit
+# validates against -- is derived from this and never from the Host header.
+# That is deliberate: the application builds no absolute URL from Host (see
+# CLAUDE.md), and SAML is the one place where the temptation arises.
+SSO_BASE_URL: str = os.environ.get("STOCKROOM_SSO_BASE_URL", "").strip().rstrip("/")
+
+# The entityID RIT knows us by. Conventionally the base URL plus /shibboleth,
+# which is what RIT's own documentation uses, but it is settable because the
+# entityID is whatever ITS put in their configuration and it must match
+# exactly.
+SSO_ENTITY_ID: str = (
+    os.environ.get("STOCKROOM_SSO_ENTITY_ID", "").strip()
+    or (f"{SSO_BASE_URL}/shibboleth" if SSO_BASE_URL else "")
+)
+
+# RIT's IdP metadata, cached on disk. Never fetched during a request: the Pi
+# may be off the network, and a sign-in that hangs on somebody else's server
+# is worse than one that refuses. `stockroom sso refresh-metadata` updates it.
+SSO_IDP_METADATA: Path = _env_path(
+    "STOCKROOM_SSO_IDP_METADATA", Path("/etc/stockroom/rit-metadata.xml")
+)
+
+SSO_SP_CERT: Path = _env_path("STOCKROOM_SSO_SP_CERT", Path("/etc/stockroom/sp.crt"))
+SSO_SP_KEY: Path = _env_path("STOCKROOM_SSO_SP_KEY", Path("/etc/stockroom/sp.key"))
+
+# Whether a first-time SSO account is usable immediately. The identity
+# provider has proved who they are, and `requester` can do very little -- ask
+# to borrow something -- so the default is yes. Set "0" where the stockroom
+# would rather keep approval as a human gate on access rather than identity.
+SSO_AUTO_APPROVE: bool = _env_bool("STOCKROOM_SSO_AUTO_APPROVE", True)
+
+# How long a started sign-in stays valid. Short on purpose: this is the window
+# in which a stolen assertion could be replayed into another browser, and a
+# person who has just clicked "Sign in" does not need five minutes of it.
+SSO_HANDSHAKE_TTL_SECONDS: int = int(
+    os.environ.get("STOCKROOM_SSO_HANDSHAKE_TTL", "300")
+)
+
+# Whether our AuthnRequests are signed. Defaults ON because RIT asks for it in
+# two places: the Shibboleth service provider page configures
+# `signing="true"`, and the metadata template on the ITS request form has
+# `AuthnRequestsSigned="true"`. Signing costs us nothing -- ITS already have
+# our certificate, because it is in the metadata they registered.
+#
+# Changing this changes the METADATA, not just our behaviour, so flipping it
+# after registration means sending ITS a new document. See
+# docs/its-registration.md.
+SSO_SIGN_REQUESTS: bool = _env_bool("STOCKROOM_SSO_SIGN_REQUESTS", True)
+
+# Whether an assertion that arrives in the clear is REFUSED. Note what this is
+# not: it is not "can RIT encrypt to us". The encryption key is published in
+# our metadata either way (see saml.sp_metadata), and python3-saml decrypts an
+# EncryptedAssertion whenever it finds one, whatever this says. So RIT can
+# always encrypt, and this only decides whether an unencrypted assertion is a
+# hard error.
+#
+# Default off, because turning it on before knowing ITS actually encrypt would
+# refuse every sign-in. Turn it on once a real assertion has been seen
+# arriving encrypted -- it is then a genuine tightening, and it needs no new
+# metadata.
+SSO_ENCRYPTED_ASSERTIONS: bool = _env_bool(
+    "STOCKROOM_SSO_ENCRYPTED_ASSERTIONS", False
+)
+
+# Whether an assertion signed with SHA-1 (RSA-SHA1, or a SHA-1 digest) is
+# refused. It should be, and the default says so.
+#
+# It is a switch rather than a constant because of what RIT's IdP metadata
+# looks like: the signing certificate was issued in 2008, and the entity still
+# advertises `urn:mace:shibboleth:1.0` and SAML 1.1 endpoints. A Shibboleth
+# IdP of that vintage signed with RSA-SHA1 by default. If ITS turn out to be
+# one, every sign-in fails with "Deprecated signature algorithm found" and the
+# only remedy must not be editing this file on a Pi at 9am.
+#
+# Setting this to "0" is a real weakening -- SHA-1 collisions are practical --
+# so it is a stopgap to be held open only while ITS move the IdP, and
+# `stockroom doctor` says so out loud for as long as it is off.
+SSO_REJECT_SHA1: bool = _env_bool("STOCKROOM_SSO_REJECT_SHA1", True)

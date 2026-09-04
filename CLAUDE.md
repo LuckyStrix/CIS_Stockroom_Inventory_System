@@ -52,13 +52,54 @@ stockroom is countable and has no `unit` rows at all.
 
 ## Security invariants
 
-Two tests in `tests/test_authz.py` enumerate the application's real route table:
+Six tests in `tests/test_authz.py` enumerate the application's real route table:
 
 - **every route** is either on `deps.PUBLIC_PATHS` or rejects anonymous callers;
-- **every POST** rejects a request with no CSRF token.
+- **every POST** rejects a request with no CSRF token;
+- **every staff-only route refuses a requester** — found by reading which
+  `require_*` each handler calls, not from a list kept by hand;
+- **no handler acts before its permission check** — the guards are called in
+  the body rather than declared as dependencies, so "guarded" and "guarded
+  first" are separate questions and only the first is visible in a listing;
+- **no page a requester can reach links to one they cannot** — it follows
+  every link and form action on those pages;
+- **the CSRF exemption is exactly one path.** `deps.CSRF_EXEMPT_PATHS` holds
+  `/sso/acs` and nothing else. That route is a cross-site POST from RIT's
+  identity provider and cannot carry our token; what replaces it is in
+  `security.consume_saml_handshake`. Note the enumerating CSRF test above has
+  **no** exemption list — `/sso/acs` reaches the same 403 on its own merits,
+  by refusing anything that is not an assertion answering a sign-in this
+  browser started.
 
-Both will fail on a newly added route that skips a guard. That is the point —
+They will fail on a newly added route that skips a guard. That is the point —
 fix the route, not the test.
+
+`_walk_routes` is what makes the first two mean anything, and it has been
+wrong before. FastAPI wraps each `include_router` in a `_IncludedRouter` that
+has no `.path` **and no `.routes`** — the real ones hang off
+`.original_router`. Reading `.routes` with a `[]` default walked past all
+seventy-eight router routes and left both tests asserting over the dozen
+declared on `app` itself, which is to say passing vacuously.
+`test_the_route_walk_actually_finds_the_routes` now fails if the walk stops
+seeing the application. **A test that enumerates is only as good as its
+enumeration**; if you touch the traversal, check the count.
+
+### Roles reach into the templates
+
+`require_staff` on the route is half of it. A page a requester can open must
+not *render* what it will then refuse:
+
+- **The route withholds the data, the template hides the control.** Both, not
+  either. `routes_items.item_detail` sends `people`, `open_loans`,
+  `past_loans`, `units` and the hold machinery only to staff — it once sent
+  them to everyone, so `item_detail.html` handed every signed-in student the
+  borrower datalist, which is every email address the stockroom holds.
+  `routes_requests.request_detail` withholds `overlaps` the same way.
+- **Borrower identity is staff-only.** The public page omits it unless
+  `config.PUBLIC_SHOW_BORROWERS` says otherwise; being signed in as a
+  requester is not a reason to be laxer than the page on the corridor wall.
+- **A control that 403s is a bug, not a defence.** The route refusing it is
+  correct and the button being there is still wrong.
 
 Other things that are load-bearing:
 
@@ -79,7 +120,19 @@ Other things that are load-bearing:
   `Referer`). Skipping it reintroduces an open redirect.
 - **Do not trust `X-Shib-*` or `X-Remote-User` headers.** That support was
   removed deliberately; nginx passes client headers through, so trusting them
-  is impersonation-as-a-service. See `docs/sso-integration.md`.
+  is impersonation-as-a-service. SSO is spoken **in process** (`saml.py`), so
+  there is no service provider in front of the app setting those headers and
+  no reason to read one. `test_the_application_never_reads_an_identity_header`
+  fails the build if any source file does. See `docs/sso-integration.md`.
+- **Single sign-on is a way to get a session, not a second kind of session.**
+  `/sso/acs` ends by calling `accounts.sso_login`, which writes the ordinary
+  `session` row the password path writes. `deps.current_account` is untouched
+  — which is why adding SSO changed no route, no service module and nothing
+  about the audit log.
+- **The SAML state cookie is `SameSite=None` and must stay that way.** A `Lax`
+  cookie is not sent on a cross-site POST, only on a top-level GET, so `Lax`
+  here means the cookie never arrives and every sign-in fails. `None` requires
+  `Secure`, so SSO requires TLS.
 
 ## Conventions
 
@@ -159,7 +212,7 @@ The phase 2 and phase 3 additions are listed below; the short version is that
 ## Testing
 
 ```bash
-.venv/bin/pytest              # 743 tests, ~2min
+.venv/bin/pytest              # 808 tests, ~2min
 ```
 
 `tests/test_web.py` drives real HTTP requests through the actual routes and
@@ -200,8 +253,68 @@ stocktake_result       <- what a finished count found, frozen
 search.resolve()       <- barcode OR asset tag -> Scan(item, unit)
 ```
 
-`SCHEMA_VERSION` is **4**. `search.resolve_scan()` still exists and still
+`SCHEMA_VERSION` is **5**. `search.resolve_scan()` still exists and still
 returns an `Item`; call `resolve()` when knowing *which* one matters.
+
+## Layout additions (phase 5)
+
+RIT Shibboleth single sign-on, off by default (`STOCKROOM_AUTH_MODE`).
+
+```
+saml.py                <- the ONLY module importing python3-saml
+web/routes_sso.py      <- /sso/login, /sso/acs, /sso/metadata, /sso/signed-out
+account.sso_uid        <- RIT's `uid`, the stable join key (schema v5)
+saml_auth_request      <- one row per started sign-in; what replaces the
+                          CSRF token on /sso/acs
+tests/fixtures/saml_idp.py     <- a fake IdP that really signs assertions
+docs/its-registration.md       <- the ITS ticket
+```
+
+**Two settings do not mean what they look like.** `SSO_SIGN_REQUESTS` is
+written into the *metadata* ITS registered, so changing it after registration
+needs a new ticket, not a restart. `SSO_ENCRYPTED_ASSERTIONS` decides only
+whether *cleartext is refused* — the encryption key is published either way,
+because `sp_metadata()` overrides the flag for that document alone. The
+toolkit conflates the two and its default publishes no encryption key at all,
+which would have told RIT we cannot decrypt.
+
+**`/sso/acs` answers with a page, not a redirect.** The session cookie is
+`SameSite=Strict`, so it is withheld from every hop of a redirect chain that
+began cross-site — which RIT's form POST is. `sso_landing.html` ends the chain
+on our own origin, and its meta refresh (not script: no `unsafe-inline`, and
+the browser has not seen our nonce) carries the cookie. No test client
+implements SameSite, so only a person in a browser would find this again.
+
+**A `staff` or `admin` account is never auto-linked to RIT.** `sso_login`
+falls back from `uid` to `mail` on first contact, which is right for
+provisioning and wrong for inheriting authority, because RIT reissue
+addresses. `accounts.link_sso`, via `stockroom user link-sso`, is the
+deliberate shell-only step — the same reasoning as the first administrator.
+
+`accounts.sso_login` and `accounts.link_sso` are the new audited mutations.
+python3-saml is an
+optional extra (`pip install -e '.[sso]'`), imported lazily, so the
+application starts and the suite runs without it.
+
+### Logs leave the machine too
+
+`logs.py` + `stockroom archive-logs`, in the nightly unit after the snapshot.
+Two things about it are counter-intuitive:
+
+- **The journal is volatile on a stock Pi.** `Storage=auto` with no
+  `/var/log/journal` means every reboot throws the log away, so
+  `harden-pi.sh` makes it persistent. There was no retention before, only the
+  appearance of one.
+- **`journalctl` outside the `systemd-journal` group exits 0 and prints
+  nothing.** So the export happily writes a valid archive of an empty journal,
+  every night. `logs.export` refuses an empty result and names the group;
+  `diagnostics.check_log_archive` decompresses the newest archive and fails if
+  it is empty. Judged by content, never by file size — a log compresses far
+  too well for a byte threshold to mean anything.
+
+It is a night behind, so it is **not** the real-time mirror RIT's standard
+asks for, and the comments say so in every place someone might be tempted to
+claim otherwise.
 
 ### Things phase 3 added that are easy to get wrong
 
@@ -244,8 +357,12 @@ returns an `Item`; call `resolve()` when knowing *which* one matters.
 
 No internet exposure, no email (so no self-service password reset and no
 notifications), no full-disk encryption. Item photos are internal — the public
-page is a single self-contained file with no asset directory. The next major piece of work is RIT
-Shibboleth SSO, which deletes the password machinery entirely; identity is
-isolated in `web/deps.py::current_account()`. Read
-`docs/sso-integration.md` — especially the note about headers — before
-touching anything identity-related.
+page is a single self-contained file with no asset directory.
+
+RIT Shibboleth SSO is **built and switched off** — it waits on an ITS
+registration ticket (`docs/its-registration.md`). Deleting the password
+machinery is deliberately *not* done: `STOCKROOM_AUTH_MODE="password"` plus a
+restart is the escape hatch if SSO breaks, and that is worth more than the
+tidiness of removing it. Identity is still isolated in
+`web/deps.py::current_account()`. Read `docs/sso-integration.md` — especially
+the note about headers — before touching anything identity-related.

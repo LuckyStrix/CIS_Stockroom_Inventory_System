@@ -71,6 +71,12 @@ HEARTBEAT_SECONDS = 60
 ROLES = ("requester", "staff", "admin")
 STATUSES = ("pending", "active", "disabled")
 
+# Which door an account came in through. schema.sql carries this as a CHECK
+# for a fresh database, and cannot for an upgrading one -- ALTER TABLE cannot
+# add a table-level constraint -- so, exactly as loan.unit_id does, the rule
+# is also enforced here in code. See CLAUDE.md.
+AUTH_SOURCES = ("password", "sso")
+
 # Ranking for permission checks: a role satisfies a requirement if it ranks at
 # or above it. Keeps guards readable ("staff or better") and avoids scattering
 # set membership tests through the routes.
@@ -102,6 +108,15 @@ class Account:
     approved_by_id: int | None
     last_login_at: str | None
     password_changed_at: str
+    # Defaulted so that a row read from a database that predates the SSO
+    # columns still builds. from_row only passes the keys the row actually
+    # has, and it filters on __slots__ -- so a column missing from this
+    # dataclass is silently dropped, and a dataclass field missing from the
+    # row is a TypeError without these.
+    sso_uid: str | None = None
+    auth_source: str = "password"
+    affiliation: str = ""
+    last_sso_login_at: str | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> Account:
@@ -127,6 +142,17 @@ class Account:
     @property
     def is_admin(self) -> bool:
         return self.has_role("admin")
+
+    @property
+    def can_use_password(self) -> bool:
+        """Whether the password form could ever sign this account in.
+
+        An SSO-provisioned account stores an empty hash, which no password
+        verifies against. Templates ask this rather than reading the hash, so
+        that "change your password" is not offered to someone who has none --
+        a control that refuses is a bug, not a defence.
+        """
+        return bool(self.password_hash)
 
     def as_actor(self) -> Actor:
         """The audit-log identity for this account."""
@@ -458,6 +484,11 @@ def change_password(
     """
     account = get_account(conn, account_id)
 
+    if not account.can_use_password:
+        raise ConflictError(
+            "This account signs in with RIT single sign-on and has no password."
+        )
+
     if current_password is not None:
         if not security.verify_password(current_password, account.password_hash).ok:
             raise AuthError("Current password is incorrect.")
@@ -559,6 +590,16 @@ def login(
         _record_failure(conn, email=email, ip=ip, note="no such account")
         raise AuthError(_GENERIC_FAILURE)
 
+    if not account.can_use_password:
+        # An SSO account has an empty hash. verify_password would refuse it
+        # anyway -- an empty string does not parse -- but it would refuse it
+        # *quickly*, and that difference is measurable. Spend the same CPU as
+        # a real verification and return the same message, so this does not
+        # become a way to ask which addresses sign in with RIT.
+        security.dummy_verify()
+        _record_failure(conn, email=email, ip=ip, note="sso-only account")
+        raise AuthError(_GENERIC_FAILURE)
+
     result = security.verify_password(password, account.password_hash)
     if not result.ok:
         _record_failure(conn, email=email, ip=ip, note="bad password")
@@ -594,6 +635,240 @@ def login(
             entity_type="account",
             entity_id=account.id,
             summary=f"{account.name} signed in",
+        )
+    return LoginResult(token=token, account=get_account(conn, account.id))
+
+
+def link_sso(
+    conn: sqlite3.Connection, *, actor: Actor, account_id: int, sso_uid: str
+) -> Account:
+    """Attach an RIT identity to an existing account, on purpose.
+
+    `sso_login` links a plain `requester` by email on its own, because there
+    is nothing there to take: the worst case is somebody borrowing under
+    somebody else's name, and RIT vouched for the address. It will not do that
+    for a `staff` or `admin` account, and this is what does it instead.
+
+    The difference is what an email match is worth. `uid` is stable; an
+    address is a label, and RIT reissue addresses after people leave. Matching
+    on one is fine for provisioning and wrong for inheriting a role that can
+    write off equipment -- so promoting an identity into a privileged account
+    is a decision a human makes, from a shell on the Pi, exactly as making the
+    first administrator is.
+
+    Callable before anybody signs in, which is the intended use: link the
+    handful of staff accounts the week before the migration term starts.
+    """
+    sso_uid = (sso_uid or "").strip()
+    if not sso_uid:
+        raise ValidationError("An RIT uid is required.")
+
+    with db.transaction(conn):
+        account = get_account(conn, account_id)
+
+        if account.sso_uid == sso_uid:
+            return account
+        if account.sso_uid:
+            raise ConflictError(
+                f"{account.email} is already linked to RIT uid "
+                f"{account.sso_uid!r}. Unlinking is not supported; make a new "
+                "account if the person has changed."
+            )
+
+        clash = _find_by_sso_uid(conn, sso_uid)
+        if clash is not None:
+            raise ConflictError(
+                f"RIT uid {sso_uid!r} is already linked to {clash.email}."
+            )
+
+        conn.execute(
+            "UPDATE account SET sso_uid = ?, updated_at = ? WHERE id = ?",
+            (sso_uid, db.utcnow(), account_id),
+        )
+        log_event(
+            conn,
+            actor=actor,
+            action="account.sso_link",
+            entity_type="account",
+            entity_id=account_id,
+            summary=(
+                f"Linked {account.email} ({account.role}) to RIT single "
+                f"sign-on as {sso_uid}"
+            ),
+            changes={"sso_uid": {"from": account.sso_uid, "to": sso_uid}},
+        )
+    return get_account(conn, account_id)
+
+
+def _find_by_sso_uid(conn: sqlite3.Connection, sso_uid: str) -> Account | None:
+    row = conn.execute(
+        "SELECT * FROM account WHERE sso_uid = ?", (sso_uid,)
+    ).fetchone()
+    return Account.from_row(row) if row else None
+
+
+def sso_login(
+    conn: sqlite3.Connection,
+    *,
+    sso_uid: str,
+    email: str,
+    first_name: str,
+    last_name: str,
+    affiliation: str = "",
+    ip: str = "",
+    user_agent: str = "",
+    actor: Actor | None = None,
+) -> LoginResult:
+    """Sign in someone RIT has just vouched for, provisioning them if new.
+
+    The caller has already validated the assertion and spent the handshake --
+    see `web/routes_sso.assertion_consumer`. By the time this runs, the
+    identity is proved; what is left is deciding which stockroom account it
+    belongs to.
+
+    Matching is by `sso_uid` first and email only as a fallback, because that
+    is the order of trustworthiness: RIT's `uid` is stable, and an address is
+    a label that can be reassigned. An existing password account is found by
+    email exactly once -- on first SSO sign-in -- and stamped with its uid,
+    which is what lets everyone's role and history survive the migration
+    without anybody re-registering.
+
+    Unlike `login`, this does not raise the deliberately vague
+    :data:`_GENERIC_FAILURE`. There is nothing to enumerate: the caller
+    already knows who they are, because RIT just told them.
+    """
+    sso_uid = (sso_uid or "").strip()
+    if not sso_uid:
+        raise ValidationError("The identity provider sent no user id.")
+    email = security.normalize_email(_require(email, "Email"))
+    if not security.is_institutional_email(email):
+        # Defensive: RIT's IdP should never assert anything else. If it does,
+        # that is a misconfiguration and not something to quietly accept.
+        raise ValidationError(f"{email} is not an RIT address.")
+    first_name = (first_name or "").strip() or email.split("@")[0]
+    last_name = (last_name or "").strip()
+
+    provisioned = False
+    with db.transaction(conn):
+        account = _find_by_sso_uid(conn, sso_uid)
+
+        if account is None:
+            by_email = find_by_email(conn, email)
+            if by_email is not None and by_email.sso_uid:
+                # Two RIT identities claiming one address. Never guess.
+                raise ConflictError(
+                    f"{email} is already linked to a different RIT account."
+                )
+            if by_email is not None and by_email.role != "requester":
+                # An email match is not enough to inherit `staff` or `admin`.
+                # Addresses get reissued after people leave; `uid` does not,
+                # which is why it is the primary key here. Silently adopting a
+                # privileged account on a name collision is the one way this
+                # flow could hand out real authority by accident, so it does
+                # not: `link_sso` exists to do it deliberately.
+                #
+                # Raised inside the transaction, so nothing is written. The
+                # person is told what to ask for, because they are a real
+                # member of staff standing at the counter and "no" with no
+                # instructions is useless.
+                raise ConflictError(
+                    f"{email} is a {by_email.role} account and will not be "
+                    "linked to RIT sign-in automatically. Ask an "
+                    "administrator to run `stockroom user link-sso` for it."
+                )
+            account = by_email
+
+        now = db.utcnow()
+        if account is None:
+            provisioned = True
+            status = "active" if config.SSO_AUTO_APPROVE else "pending"
+            cur = conn.execute(
+                """
+                INSERT INTO account (first_name, last_name, email, password_hash,
+                                     role, status, created_at, updated_at,
+                                     password_changed_at, sso_uid, auth_source,
+                                     affiliation, last_sso_login_at)
+                VALUES (?, ?, ?, '', 'requester', ?, ?, ?, ?, ?, 'sso', ?, ?)
+                """,
+                (first_name, last_name, email, status, now, now, now,
+                 sso_uid, affiliation or "", now),
+            )
+            account_id = int(cur.lastrowid)
+            log_event(
+                conn,
+                actor=actor or Actor(name=f"{first_name} {last_name}", email=email),
+                action="account.sso_provision",
+                entity_type="account",
+                entity_id=account_id,
+                summary=(
+                    f"Created account {first_name} {last_name} <{email}> "
+                    f"from RIT single sign-on ({status})"
+                ),
+                changes={"role": {"from": None, "to": "requester"},
+                         "status": {"from": None, "to": status}},
+            )
+        else:
+            account_id = account.id
+            changes: dict[str, dict[str, Any]] = {}
+            if not account.sso_uid:
+                changes["sso_uid"] = {"from": None, "to": sso_uid}
+            # The identity provider is authoritative for a person's name.
+            if first_name != account.first_name:
+                changes["first_name"] = {"from": account.first_name, "to": first_name}
+            if last_name != account.last_name:
+                changes["last_name"] = {"from": account.last_name, "to": last_name}
+            if (affiliation or "") != account.affiliation:
+                changes["affiliation"] = {"from": account.affiliation,
+                                          "to": affiliation or ""}
+            conn.execute(
+                "UPDATE account SET sso_uid = ?, first_name = ?, last_name = ?, "
+                "affiliation = ?, last_sso_login_at = ?, updated_at = ? WHERE id = ?",
+                (sso_uid, first_name, last_name, affiliation or "", now, now,
+                 account_id),
+            )
+            if changes:
+                log_event(
+                    conn,
+                    actor=actor or Actor(name=f"{first_name} {last_name}", email=email),
+                    action="account.sso_link",
+                    entity_type="account",
+                    entity_id=account_id,
+                    summary=f"Linked {email} to RIT single sign-on ({sso_uid})",
+                    changes=changes,
+                )
+        account = get_account(conn, account_id)
+
+    # Outside the transaction above on purpose. A provisioned account that is
+    # waiting for approval must SURVIVE this refusal -- rolling it back would
+    # leave staff with nothing to approve and the person unable to do anything
+    # but try again forever.
+    if not account.is_active:
+        raise AuthError(
+            "Your stockroom account is not active yet. "
+            "Stockroom staff have been asked to approve it."
+            if account.status == "pending"
+            else "This stockroom account has been disabled."
+        )
+
+    if provisioned or account.person_id is None:
+        _link_person(conn, actor=actor or account.as_actor(), account=account)
+        account = get_account(conn, account.id)
+
+    token = security.new_token()
+    with db.transaction(conn):
+        _create_session(conn, account_id=account.id, token=token,
+                        ip=ip, user_agent=user_agent)
+        conn.execute(
+            "UPDATE account SET last_login_at = ? WHERE id = ?",
+            (db.utcnow(), account.id),
+        )
+        log_event(
+            conn,
+            actor=account.as_actor(),
+            action="auth.sso_login",
+            entity_type="account",
+            entity_id=account.id,
+            summary=f"{account.name} signed in with RIT single sign-on",
         )
     return LoginResult(token=token, account=get_account(conn, account.id))
 

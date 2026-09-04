@@ -227,6 +227,52 @@ else
     exit 1
 fi
 
+# --------------------------------------------------------------------------
+# Single sign-on, if and only if it has been asked for.
+#
+# Everything here is skipped when STOCKROOM_AUTH_MODE is unset or "password",
+# which is the default and the state of the Pi until RIT ITS have registered
+# the service provider. That keeps a normal install exactly as fast and as
+# small as it has always been -- python3-saml pulls in lxml and xmlsec, which
+# are native extensions, and nobody should pay for them to run a stockroom on
+# passwords.
+# --------------------------------------------------------------------------
+( load_env_file "$ENV_FILE"
+  if [[ "${STOCKROOM_AUTH_MODE:-password}" != "password" ]]; then
+      say "Setting up RIT single sign-on"
+
+      # Build dependencies for xmlsec. A wheel usually exists for this
+      # architecture and none of this is needed; when one does not, the
+      # compile fails with a header error that reads like a Python problem.
+      apt-get install -y --no-install-recommends \
+          libxmlsec1-dev libxml2-dev pkg-config python3-dev
+
+      "$APP_DIR/.venv/bin/pip" install -q -e "$APP_DIR[sso]"
+
+      # Owned by the service account, because `sso init` runs AS the service
+      # account and writes the keypair here. A root-owned 0755 directory --
+      # which is what `install -d` gives you if you do not say otherwise --
+      # made openssl fail with "Permission denied", and the failure was
+      # invisible: the `|| { ... }` below turned it into "not ready yet", the
+      # chmod afterwards was `|| true`, and single sign-on silently never got
+      # set up on a fresh Pi. 0750, because the private key lives here.
+      install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 /etc/stockroom
+      # Generates the SAML keypair and caches RIT's metadata. Never
+      # overwrites an existing key: doing so would silently invalidate a
+      # registration ITS have already accepted.
+      sudo -u "$SERVICE_USER" --preserve-env=STOCKROOM_AUTH_MODE,STOCKROOM_SSO_BASE_URL,STOCKROOM_SSO_ENTITY_ID,STOCKROOM_SSO_SP_CERT,STOCKROOM_SSO_SP_KEY,STOCKROOM_SSO_IDP_METADATA \
+          "$APP_DIR/.venv/bin/stockroom" sso init || {
+          echo "  Single sign-on is not ready yet. The service will still" >&2
+          echo "  start; see docs/its-registration.md." >&2
+      }
+      # The private key is read by the service, not by everyone on the Pi.
+      # `stockroom sso init` already creates it 0640; this is belt and braces
+      # for a key restored from a backup or copied in by hand.
+      chgrp "$SERVICE_USER" /etc/stockroom/sp.key 2>/dev/null || true
+      chmod 0640 /etc/stockroom/sp.key 2>/dev/null || true
+  fi
+)
+
 say "Installing systemd units"
 install -m 0644 "$REPO_DIR/deploy/stockroom.service"        /etc/systemd/system/
 install -m 0644 "$REPO_DIR/deploy/stockroom-backup.service" /etc/systemd/system/

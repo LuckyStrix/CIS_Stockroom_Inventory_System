@@ -22,6 +22,7 @@ train people to ignore a red timer.
 
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 import sqlite3
@@ -226,6 +227,48 @@ def check_offsite_backups(*, skip_remote: bool = False) -> Check:
     return Check("off-box backups", worst, "; ".join(parts))
 
 
+def check_log_archive() -> Check:
+    """Is the system log leaving the machine, and recently?
+
+    Separate from the backup check because the failure is different and
+    quieter: an export that returns nothing still writes a file, still
+    uploads, and still looks like success. The usual cause is the service
+    account not being in `systemd-journal`, which makes journalctl print that
+    user's own empty journal and exit 0.
+    """
+    archives = sorted(config.BACKUP_DIR.glob(backup_targets.LOG_GLOB))
+    if not archives:
+        return Check(
+            "log archive", WARN,
+            "no journal export yet -- the nightly job runs `stockroom "
+            "archive-logs`; run it once by hand to check it works",
+        )
+
+    newest = archives[-1]
+    age = _age_hours(datetime.fromtimestamp(newest.stat().st_mtime, tz=timezone.utc))
+    detail = f"{len(archives)} kept, newest {newest.name} ({_describe_age(age)})"
+
+    # Judged by what decompresses out of it, not by its size on disk: a log is
+    # extremely compressible, so "small gzip" and "empty journal" are not the
+    # same thing and a byte threshold gets it wrong in both directions. Only
+    # the first few KB are read, which is enough to tell empty from not and
+    # bounded whatever the archive holds.
+    try:
+        with gzip.open(newest, "rt", encoding="utf-8", errors="replace") as handle:
+            head = handle.read(4096)
+    except OSError as exc:
+        return Check("log archive", FAIL, f"{detail} -- unreadable: {exc}")
+    if not head.strip():
+        return Check("log archive", FAIL,
+                     f"{detail} -- and it is empty. The service account is "
+                     "probably not in the `systemd-journal` group; re-run "
+                     "deploy/harden-pi.sh and restart stockroom-backup")
+    if age > 48:
+        return Check("log archive", WARN,
+                     f"{detail} -- the nightly export has not run since")
+    return Check("log archive", OK, detail)
+
+
 def _unwritable_reason(target) -> str:
     """Why this target cannot be written to, or '' if it can.
 
@@ -401,6 +444,62 @@ def check_data_consistency(conn: sqlite3.Connection) -> Check:
     return Check("data consistency", OK, "no impossible states found")
 
 
+def check_sso(conn: sqlite3.Connection | None = None) -> Check:
+    """Whether single sign-on is in the state the configuration says it is.
+
+    Silent in password mode, which is the default and not a fault. The failure
+    this exists to catch is the loud one: AUTH_MODE says sso and something is
+    missing, which means nobody can sign in at all.
+    """
+    from . import saml
+
+    if config.AUTH_MODE == "password":
+        return Check("single sign-on", OK, "not in use (auth mode: password)")
+
+    problems = saml.missing_pieces()
+    if problems:
+        # WARN rather than FAIL in "both" mode: the password form still works,
+        # so the stockroom is running, but the RIT button is broken.
+        level = FAIL if config.AUTH_MODE == "sso" else WARN
+        return Check("single sign-on", level,
+                     f"auth mode is {config.AUTH_MODE} but: " + "; ".join(problems))
+
+    try:
+        saml.settings_dict()
+    except saml.SamlError as exc:
+        return Check("single sign-on", FAIL, f"settings will not load: {exc}")
+
+    try:
+        cached = datetime.fromtimestamp(
+            config.SSO_IDP_METADATA.stat().st_mtime, tz=timezone.utc
+        )
+        age = _age_hours(cached)
+    except OSError:
+        age = None
+    detail = f"{config.AUTH_MODE} · {saml.entity_id()}"
+
+    warnings = []
+    if age is not None and age > 24 * 180:
+        # RIT rotate their signing certificate. Cached metadata that predates
+        # a rotation fails every sign-in with a signature error, and the fix
+        # -- `stockroom sso init --refresh` -- is not one anybody guesses.
+        warnings.append(
+            f"RIT metadata cached {_describe_age(age)}; "
+            "refresh it with `stockroom sso init --refresh`"
+        )
+    if not config.SSO_REJECT_SHA1:
+        # Said out loud every time, because this is meant to be a stopgap held
+        # open while ITS move the identity provider, and a stopgap nobody is
+        # reminded of is a permanent setting.
+        warnings.append(
+            "STOCKROOM_SSO_REJECT_SHA1=0 — SHA-1 signed assertions are being "
+            "accepted; ask ITS to sign with SHA-256 and turn this back on"
+        )
+    if warnings:
+        return Check("single sign-on", WARN, f"{detail} · " + " · ".join(warnings))
+    return Check("single sign-on", OK, detail)
+
+
 # ---------------------------------------------------------------------------
 # running them
 # ---------------------------------------------------------------------------
@@ -417,10 +516,12 @@ def run_all(conn: sqlite3.Connection, *, skip_remote: bool = False) -> Report:
         ("data consistency", lambda: check_data_consistency(conn)),
         ("local backups", lambda: check_backups(conn)),
         ("off-box backups", lambda: check_offsite_backups(skip_remote=skip_remote)),
+        ("log archive", check_log_archive),
         ("public page", lambda: check_publish(conn)),
         ("disk space", lambda: check_disk_space(conn)),
         ("administrators", lambda: check_administrators(conn)),
         ("waiting queues", lambda: check_queues(conn)),
+        ("single sign-on", lambda: check_sso(conn)),
     ):
         try:
             checks.append(run())

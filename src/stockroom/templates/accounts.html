@@ -38,6 +38,7 @@
         </form>
         {% else %}
           <span class="pill grey">{{ a.role }}</span>
+          {% if a.auth_source == 'sso' %}<span class="pill grey tiny">SSO</span>{% endif %}
         {% endif %}
       </td>
       <td><span class="pill {{ a.status|status_class }}">{{ a.status }}</span></td>

@@ -25,19 +25,28 @@
 </div>
 {% endif %}
 
+{# The counts are the same for everyone -- they are what the public page
+   shows -- but three of these tiles link into /loans and /history, which are
+   staff-only. A requester gets the figure without the dead link. #}
 <div class="stats">
   <a class="stat" href="/items"><b>{{ summary.item_count }}</b><span>Item types</span></a>
   <a class="stat" href="/items"><b>{{ summary.units_available }}</b><span>Available</span></a>
+  {% if account.is_staff %}
   <a class="stat" href="/loans"><b>{{ summary.units_out }}</b><span>Checked out</span></a>
   <a class="stat {% if summary.overdue_count %}alert{% endif %}" href="/loans?filter=overdue">
     <b>{{ summary.overdue_count }}</b><span>Overdue</span></a>
+  {% else %}
+  <span class="stat"><b>{{ summary.units_out }}</b><span>Checked out</span></span>
+  {% endif %}
   <a class="stat {% if summary.low_stock_count %}alert{% endif %}" href="/items?filter=low">
     <b>{{ summary.low_stock_count }}</b><span>Low stock</span></a>
   {% if summary.units_held %}
   <a class="stat {% if summary.units_unaccounted %}alert{% endif %}" href="/items?filter=held">
     <b>{{ summary.units_held }}</b><span>Out of service</span></a>
   {% endif %}
+  {% if account.is_staff %}
   <a class="stat" href="/history"><b>{{ summary.event_count }}</b><span>Logged changes</span></a>
+  {% endif %}
 </div>
 
 {% if overdue and account.is_staff %}

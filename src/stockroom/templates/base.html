@@ -42,7 +42,7 @@
   </div>
   {% else %}
   <nav><a href="/public/" target="_blank" rel="noopener">Public inventory ↗</a></nav>
-  <div class="who"><a href="/login">Sign in</a></div>
+  <div class="who"><a href="{{ sign_in_url or '/login' }}">Sign in</a></div>
   {% endif %}
 </div></div>
 

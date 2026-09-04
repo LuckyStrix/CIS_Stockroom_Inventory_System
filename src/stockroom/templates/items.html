@@ -8,11 +8,20 @@
     <h1>Items</h1>
     <p class="lede">{{ items|length }} shown{% if query %} matching “{{ query }}”{% endif %}.</p>
   </div>
+  {# Staff-only: all three of these routes require_staff, so showing them to a
+     requester is a button that answers 403. #}
+  {% if account.is_staff %}
   <div class="actions">
     <a class="btn secondary" href="/labels">Print labels</a>
     <a class="btn secondary" href="/export.csv">Export CSV</a>
     <a class="btn" href="/items/new">Add item</a>
   </div>
+  {% else %}
+  <div class="actions">
+    <a class="btn" href="/requests/new/borrow">Borrow equipment</a>
+    <a class="btn secondary" href="/requests/new/new_item">Suggest an item</a>
+  </div>
+  {% endif %}
 </div>
 
 <div class="filters">
@@ -45,7 +54,11 @@
 {% else %}
 <div class="empty">
   No items{% if query %} match that search{% endif %}.
+  {% if account.is_staff %}
   <div class="mt"><a class="btn" href="/items/new">Add an item</a></div>
+  {% elif not query %}
+  <div class="mt"><a class="btn" href="/requests/new/new_item">Suggest an item</a></div>
+  {% endif %}
 </div>
 {% endif %}
 </div>
