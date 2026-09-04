@@ -277,9 +277,16 @@ as the service user, because that is where the app expects the config:
 
 ```bash
 sudo apt install rclone
-sudo -u stockroom rclone config          # create the remote, do the OAuth
+sudo -u stockroom -H rclone config       # create the remote, do the OAuth
+sudo -u stockroom -H rclone config file  # confirm where it landed
 stockroom backup
 ```
+
+> **The `-H` is load-bearing.** rclone reads `$HOME/.config/rclone/rclone.conf`,
+> and without `-H` sudo leaves `HOME` pointing at the human who typed the
+> command — so the config lands somewhere the nightly unit will never look.
+> systemd sets `HOME` from the account database, which is why this is the one
+> place the two can disagree.
 
 ```bash
 STOCKROOM_BACKUP_REMOTE=gdrive:stockroom-backups

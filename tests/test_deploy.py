@@ -651,6 +651,24 @@ def test_the_wrapper_runs_the_cli_as_the_service_user():
     )
 
 
+def test_the_wrapper_gives_the_cli_the_service_accounts_home():
+    """Otherwise rclone and git read the wrong user's configuration.
+
+    sudo leaves HOME pointing at whoever typed the command unless -H is given.
+    systemd sets it from the account database, so the nightly unit found
+    /var/lib/stockroom/.config/rclone/rclone.conf and the same command run by
+    hand did not -- "works from cron, fails when I run it", which is the least
+    debuggable shape a problem can have, and defeats the point of being able
+    to test the nightly job by hand.
+    """
+    body = (_DEPLOY / "stockroom-wrapper.sh").read_text()
+    sudo_lines = [line for line in body.splitlines()
+                  if line.strip().startswith("exec sudo")]
+    assert sudo_lines, "the wrapper stopped using sudo"
+    for line in sudo_lines:
+        assert " -H " in line, f"{line.strip()} does not set HOME"
+
+
 def test_the_wrapper_carries_the_apps_environment_across_sudo():
     """`STOCKROOM_ENV_FILE=... stockroom status` is documented in
     docs/operations.md. Plain sudo resets the environment, which would point

@@ -38,8 +38,20 @@ fi
 # the contract in docs/operations.md.
 KEEP="$(env | sed -n 's/^\(STOCKROOM_[A-Za-z0-9_]*\)=.*/\1/p' | paste -sd, -)"
 
+# -H SETS HOME TO THE SERVICE ACCOUNT'S. Without it sudo leaves HOME pointing
+# at the human who typed the command, and the CLI's own subprocesses read
+# their configuration from there:
+#
+#   rclone   $HOME/.config/rclone/rclone.conf -- the backup remote
+#   git      $HOME/.gitconfig and its credentials -- the Pages publisher
+#
+# systemd sets HOME from the account database, so the nightly unit found both
+# and a human running the identical command did not. "It works from cron and
+# fails when I run it" is the least debuggable shape a problem can have, and
+# the whole point of `stockroom backup` being runnable by hand is to prove
+# the nightly job will work.
 if [[ -n "$KEEP" ]]; then
-    exec sudo --preserve-env="$KEEP" -u "$SERVICE_USER" "$REAL" "$@"
+    exec sudo -H --preserve-env="$KEEP" -u "$SERVICE_USER" "$REAL" "$@"
 fi
 
-exec sudo -u "$SERVICE_USER" "$REAL" "$@"
+exec sudo -H -u "$SERVICE_USER" "$REAL" "$@"
