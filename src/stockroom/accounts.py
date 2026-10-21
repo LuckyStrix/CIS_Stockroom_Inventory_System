@@ -700,6 +700,68 @@ def link_sso(
     return get_account(conn, account_id)
 
 
+def relink_sso(
+    conn: sqlite3.Connection,
+    *,
+    actor: Actor,
+    account_id: int,
+    from_uid: str,
+    sso_uid: str,
+) -> Account:
+    """Move an account from one RIT uid to another, on purpose.
+
+    `link_sso` refuses to touch an account that is already linked, and that is
+    right for the case it guards: a uid quietly changing under somebody is how
+    an account gets taken over. This exists for the other case -- the link was
+    wrong from the start, because somebody typed a university ID where RIT's
+    `uid` belongs -- and it is shell-only for the same reason `link_sso` is.
+
+    `from_uid` has to be the uid the account holds now. Making the caller say
+    it means a mistyped email or a stale idea of who owns what fails here
+    instead of re-pointing the wrong person's authority, and the event records
+    both ends so the change can be read back later.
+    """
+    from_uid = (from_uid or "").strip()
+    sso_uid = (sso_uid or "").strip()
+    if not from_uid or not sso_uid:
+        raise ValidationError("Both the current and the new RIT uid are required.")
+
+    with db.transaction(conn):
+        account = get_account(conn, account_id)
+
+        if account.sso_uid != from_uid:
+            raise ConflictError(
+                f"{account.email} is linked to RIT uid {account.sso_uid!r}, "
+                f"not {from_uid!r}; nothing was changed."
+            )
+        if sso_uid == from_uid:
+            return account
+
+        clash = _find_by_sso_uid(conn, sso_uid)
+        if clash is not None:
+            raise ConflictError(
+                f"RIT uid {sso_uid!r} is already linked to {clash.email}."
+            )
+
+        conn.execute(
+            "UPDATE account SET sso_uid = ?, updated_at = ? WHERE id = ?",
+            (sso_uid, db.utcnow(), account_id),
+        )
+        log_event(
+            conn,
+            actor=actor,
+            action="account.sso_relink",
+            entity_type="account",
+            entity_id=account_id,
+            summary=(
+                f"Re-linked {account.email} ({account.role}) from RIT uid "
+                f"{from_uid} to {sso_uid}"
+            ),
+            changes={"sso_uid": {"from": from_uid, "to": sso_uid}},
+        )
+    return get_account(conn, account_id)
+
+
 def _find_by_sso_uid(conn: sqlite3.Connection, sso_uid: str) -> Account | None:
     row = conn.execute(
         "SELECT * FROM account WHERE sso_uid = ?", (sso_uid,)

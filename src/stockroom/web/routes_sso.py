@@ -167,7 +167,12 @@ def assertion_consumer(
         clear_saml_state_cookie(response, request)
         return response
     except StockroomError as exc:
-        logger.warning("SSO: sign-in refused for %s: %s", assertion.email, exc)
+        # The uid is logged because "already linked to a different RIT
+        # account" is unanswerable without it: the person at the counter does
+        # not know what RIT calls them, and the fix is a shell command that
+        # needs exactly this value. It is a username, not a credential.
+        logger.warning("SSO: sign-in refused for %s (uid %s): %s",
+                       assertion.email, assertion.sso_uid, exc)
         response = redirect("/login", error=str(exc))
         clear_saml_state_cookie(response, request)
         return response

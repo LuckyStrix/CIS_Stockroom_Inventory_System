@@ -839,3 +839,70 @@ def test_an_attribute_we_cannot_place_is_logged_not_swallowed(client, idp, caplo
     messages = " ".join(record.getMessage() for record in caplog.records)
     assert "ritEduSomethingNew" in messages
     assert "a value nobody should log" not in messages
+
+
+def test_a_wrong_link_can_be_corrected_but_only_by_naming_it(conn):
+    """The case `link_sso` refuses: the first link was a typo, not a person.
+
+    Somebody once linked a university ID where RIT's `uid` belongs, and the
+    account then refused its owner's real sign-in as "already linked to a
+    different RIT account" with no way out short of editing the database --
+    which would have bypassed the audit log. The current uid has to be
+    restated so that a stale idea of who owns what fails instead.
+    """
+    from stockroom.service import ConflictError
+
+    ada = accounts.register(
+        conn, first_name="Ada", last_name="Byron", email="abc1234@rit.edu",
+        password="glass onion tuesday lamp", role="admin", status="active",
+        actor=SETUP,
+    )
+    accounts.link_sso(conn, actor=SETUP, account_id=ada.id, sso_uid="411005550")
+
+    with pytest.raises(ConflictError):
+        accounts.relink_sso(conn, actor=SETUP, account_id=ada.id,
+                            from_uid="not-her-uid", sso_uid="abc1234")
+    assert accounts.get_account(conn, ada.id).sso_uid == "411005550"
+
+    fixed = accounts.relink_sso(conn, actor=SETUP, account_id=ada.id,
+                                from_uid="411005550", sso_uid="abc1234")
+    assert fixed.sso_uid == "abc1234"
+    assert fixed.role == "admin"
+
+
+def test_a_corrected_link_signs_in(client, idp, conn):
+    existing = accounts.register(
+        conn, first_name="Ada", last_name="Byron", email="abc1234@rit.edu",
+        password="glass onion tuesday lamp", role="admin", status="active",
+        actor=SETUP,
+    )
+    accounts.link_sso(conn, actor=SETUP, account_id=existing.id,
+                      sso_uid="411005550")
+    accounts.relink_sso(conn, actor=SETUP, account_id=existing.id,
+                        from_uid="411005550", sso_uid="abc1234")
+
+    request_id, relay = start(client)
+    landed_at(finish(client, idp, request_id, relay))
+
+    assert accounts.find_by_email(conn, "abc1234@rit.edu").id == existing.id
+
+
+def test_a_relink_cannot_take_a_uid_someone_else_holds(conn):
+    from stockroom.service import ConflictError
+
+    a = accounts.register(
+        conn, first_name="Ada", last_name="Byron", email="abc1234@rit.edu",
+        password="glass onion tuesday lamp", role="staff", status="active",
+        actor=SETUP,
+    )
+    b = accounts.register(
+        conn, first_name="Grace", last_name="Hopper", email="ghz9999@rit.edu",
+        password="glass onion tuesday lamp", role="staff", status="active",
+        actor=SETUP,
+    )
+    accounts.link_sso(conn, actor=SETUP, account_id=a.id, sso_uid="abc1234")
+    accounts.link_sso(conn, actor=SETUP, account_id=b.id, sso_uid="wrong")
+
+    with pytest.raises(ConflictError):
+        accounts.relink_sso(conn, actor=SETUP, account_id=b.id,
+                            from_uid="wrong", sso_uid="abc1234")
