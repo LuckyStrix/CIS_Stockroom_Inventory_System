@@ -24,7 +24,7 @@ Before writing, open the settings (the gear icon) and set:
 
 - **Hostname:** `cis-stockroom` — this becomes `cis-stockroom.local`. If ITS
   has given the Pi a DNS record, set the hostname to match its first label
-  (the CIS one is `cisstockroom.device.rit.edu`, so `cisstockroom`): the TLS
+  (the CIS one is `stockroom.cis.rit.edu`, so `stockroom`): the TLS
   certificate's names and the app's `Host` allow list are both derived from
   the hostname, and they follow the qualified name only if the machine knows
   it. `hostname -f` should print the full record
@@ -94,7 +94,7 @@ When it finishes:
 
 `<pi>` is whatever the machine is called. The installer prints the exact URLs
 when it finishes, so use those rather than guessing. If the Pi has a DNS
-record — the CIS one is `cisstockroom.device.rit.edu` — that is the name to
+record — the CIS one is `stockroom.cis.rit.edu` — that is the name to
 give people; otherwise it is the short hostname with `.local`.
 
 The installer prints the Pi's IP address alongside these, and all of them work:

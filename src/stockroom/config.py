@@ -40,7 +40,7 @@ Environment variables (all optional):
     STOCKROOM_MAX_UPLOAD_BYTES        reject a request body larger than this
     STOCKROOM_AUTH_MODE               "password" (default), "sso" or "both"
     STOCKROOM_SSO_BASE_URL            the SP's own https:// origin, e.g.
-                                      https://cisstockroom.device.rit.edu
+                                      https://stockroom.cis.rit.edu
     STOCKROOM_SSO_ENTITY_ID           default <base>/shibboleth
     STOCKROOM_SSO_IDP_METADATA        cached copy of RIT's rit-metadata.xml
     STOCKROOM_SSO_SP_CERT             the SP certificate (PEM)

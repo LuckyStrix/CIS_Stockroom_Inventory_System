@@ -44,14 +44,14 @@ answers below are departmental commitments, not one person's.
 
 | Field | Value |
 |---|---|
-| entityID | `https://cisstockroom.device.rit.edu/shibboleth` |
-| Assertion Consumer Service | `https://cisstockroom.device.rit.edu/sso/acs` |
+| entityID | `https://stockroom.cis.rit.edu/shibboleth` |
+| Assertion Consumer Service | `https://stockroom.cis.rit.edu/sso/acs` |
 | ACS binding | HTTP-POST, `index="1"` — the index in RIT's own template |
 | AuthnRequestsSigned | `true` |
 | Key descriptors | `signing` **and** `encryption`, the same self-signed certificate |
-| Metadata URL | `https://cisstockroom.device.rit.edu/sso/metadata` |
+| Metadata URL | `https://stockroom.cis.rit.edu/sso/metadata` |
 | Single Logout | **none offered** — RIT's IdP publishes none either |
-| Host | `cisstockroom.device.rit.edu` → 129.21.66.182 |
+| Host | `stockroom.cis.rit.edu` → 129.21.58.13 |
 | Reachable from | the campus network only (ufw: 129.21.0.0/16 and the private ranges eduroam NATs behind) |
 | Implementation | `python3-saml`, the OneLogin Python toolkit RIT document |
 
@@ -196,11 +196,10 @@ single-file change if ISO would prefer that. Ask them which they want.
 3. **Are signed AuthnRequests verified, or ignored?** We sign, per their
    template. Only worth asking so that nobody is surprised later.
 4. **Can we get a browser-trusted TLS certificate for
-   `cisstockroom.device.rit.edu`?** It is currently self-signed. A certificate
-   warning in the middle of a sign-in redirect is where users abandon, and
-   `.device.rit.edu` may not be an eligible namespace — this is the question
-   to settle early. The SAML signing keypair is separate and is self-signed by
-   design; it does not need a certificate authority.
+   `stockroom.cis.rit.edu`?** It is currently self-signed. A certificate
+   warning in the middle of a sign-in redirect is where users abandon, so
+   this is the question to settle early. The SAML signing keypair is separate
+   and is self-signed by design; it does not need a certificate authority.
 5. **How will we know when the IdP signing certificate rotates?** A stale
    cached copy of `rit-metadata.xml` fails every sign-in with a signature
    error. `stockroom doctor` warns at six months; a heads-up is better.
