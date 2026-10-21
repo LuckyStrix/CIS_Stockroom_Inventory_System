@@ -7,6 +7,7 @@ corrupt, discovered on the one day anybody needed them.
 
 from __future__ import annotations
 
+import argparse
 import os
 import sqlite3
 import stat
@@ -555,3 +556,25 @@ def test_doctor_is_content_with_a_real_log_archive(tmp_path, temp_env, monkeypat
         h.write("a realistic amount of journal " * 100)
 
     assert diagnostics.check_log_archive().status == diagnostics.OK
+
+
+def test_a_backup_that_goes_nowhere_says_so(tmp_path, temp_env, monkeypatch,
+                                            capsys):
+    """The silence that sends people looking through Google Drive.
+
+    With no target configured this returned 0 and printed nothing about it, so
+    a backup that never left the machine looked exactly like one that did --
+    at precisely the moment somebody has just configured a remote and is
+    watching the output to find out whether it worked.
+    """
+    from stockroom import cli
+
+    monkeypatch.setattr(config, "BACKUP_COPY_DIR", None)
+    monkeypatch.setattr(config, "BACKUP_REMOTE", "")
+
+    args = argparse.Namespace(output=None, no_upload=False, actor=None)
+    assert cli.cmd_backup(args) == 0
+
+    out = capsys.readouterr().out
+    assert "No off-box target configured" in out
+    assert "STOCKROOM_BACKUP_REMOTE" in out

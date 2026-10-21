@@ -254,6 +254,15 @@ def cmd_backup(args) -> int:
 
     targets = backup_targets.configured_targets()
     if not targets:
+        # Said out loud, every time. This used to return silently, which made
+        # a successful-looking `stockroom backup` and a backup that never
+        # left the machine indistinguishable at the terminal -- and the one
+        # moment somebody is watching this output is the moment they have
+        # just configured a remote and want to know whether it worked.
+        print("No off-box target configured, so this copy stays on this "
+              "machine.\n"
+              "  Set STOCKROOM_BACKUP_REMOTE or STOCKROOM_BACKUP_COPY_DIR in "
+              f"{config.ENV_FILE}; see docs/operations.md.")
         return 0
     failures = backup_targets.copy_to_targets(target, targets)
     for target_obj in targets:
@@ -361,17 +370,21 @@ def cmd_archive_logs(args) -> int:
 
     targets = backup_targets.configured_targets()
     if not targets:
-        # Not an error: an installation that has not been told where to put an
-        # off-box copy does not get one invented for it. `doctor` is what says
-        # so, once, rather than this saying it every night.
+        # Not an error -- an installation that has not been told where to put
+        # an off-box copy does not get one invented for it -- but not silent
+        # either, for the same reason as `backup` above.
+        print("No off-box target configured, so this archive stays on this "
+              "machine.\n"
+              "  Set STOCKROOM_BACKUP_REMOTE or STOCKROOM_BACKUP_COPY_DIR in "
+              f"{config.ENV_FILE}; see docs/operations.md.")
         return 0
 
     failures = backup_targets.copy_logs_to_targets(archive, targets)
     for target in targets:
         if not any(f.target == target.name for f in failures):
-            print(f"Sent to {target.name}")
+            print(f"Copied to {target.name}")
     for failure in failures:
-        print(f"Error: {failure}", file=sys.stderr)
+        print(f"Error: could not copy to {failure}", file=sys.stderr)
     return 1 if failures else 0
 
 
@@ -595,6 +608,25 @@ def cmd_user_role(args) -> int:
         conn, actor=_actor(args), account_id=account.id, role=args.role
     )
     print(f"{updated.name} is now {updated.role}.")
+    return 0
+
+
+def cmd_user_relink_sso(args) -> int:
+    """Correct an RIT uid that was linked wrongly.
+
+    `link-sso` will not move an account that is already linked, deliberately.
+    This is the other half: the shell-only way to fix a link that was wrong
+    from the start. The current uid has to be restated, so a typo cannot
+    re-point somebody else's account.
+    """
+    conn = _conn()
+    account = _find_account(conn, args.email)
+    linked = accounts.relink_sso(
+        conn, actor=_actor(args), account_id=account.id,
+        from_uid=args.from_uid, sso_uid=args.uid,
+    )
+    print(f"{linked.name} <{linked.email}> ({linked.role}) is now RIT uid "
+          f"{linked.sso_uid}.")
     return 0
 
 
@@ -866,6 +898,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("email")
     p.add_argument("uid", help="RIT's `uid` attribute, e.g. abc1234")
     p.set_defaults(func=cmd_user_link_sso)
+
+    p = user.add_parser(
+        "relink-sso", help="correct an RIT uid that was linked wrongly"
+    )
+    p.add_argument("email")
+    p.add_argument("from_uid", help="the uid the account holds now")
+    p.add_argument("uid", help="RIT's `uid` attribute it should hold")
+    p.set_defaults(func=cmd_user_relink_sso)
 
     p = user.add_parser("disable", help="switch an account off")
     p.add_argument("email")
