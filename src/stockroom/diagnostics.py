@@ -26,6 +26,8 @@ import gzip
 import json
 import shutil
 import sqlite3
+import ssl
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +43,14 @@ _BACKUP_STALE_HOURS = 48
 # Below this, WAL growth and the next snapshot become the problem.
 _DISK_WARN_MB = 500
 _DISK_FAIL_MB = 100
+# certbot renews with thirty days left. Under three weeks means it has been
+# failing for a week and a half, which is long enough to be real and still
+# leaves time to fix it before every browser starts warning.
+_TLS_WARN_DAYS = 21
+# What nginx serves (deploy/nginx-stockroom.conf). Not a setting: nginx's
+# config names this path literally, so making it configurable here would only
+# let the two disagree.
+TLS_CERT = Path("/etc/ssl/stockroom/stockroom.crt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,6 +510,47 @@ def check_sso(conn: sqlite3.Connection | None = None) -> Check:
     return Check("single sign-on", OK, detail)
 
 
+def check_tls_certificate(conn: sqlite3.Connection | None = None) -> Check:
+    """Whether the certificate nginx serves is about to stop working.
+
+    The failure this is for is a Let's Encrypt renewal that stopped -- the
+    firewall hook broke, the timer was disabled, RIT started filtering port 80.
+    certbot's only complaint is in a journal nobody reads, and ninety days
+    later every browser on campus refuses the stockroom. A self-signed
+    certificate is reported, not warned about: browsers already complain about
+    it, and a warning that is always on teaches people to ignore the colour.
+    """
+    name = "TLS certificate"
+    if not TLS_CERT.exists():
+        return Check(name, OK, f"none at {TLS_CERT} (nginx is not on this machine)")
+    try:
+        out = subprocess.run(
+            ["openssl", "x509", "-in", str(TLS_CERT), "-noout",
+             "-enddate", "-issuer", "-subject"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Check(name, WARN, f"cannot read {TLS_CERT}: {exc}")
+    fields = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    expires = datetime.fromtimestamp(
+        ssl.cert_time_to_seconds(fields["notAfter"]), tz=timezone.utc
+    )
+    days = (expires - datetime.now(timezone.utc)).total_seconds() / 86400
+    self_signed = fields.get("issuer") == fields.get("subject")
+    issuer = "self-signed" if self_signed else f"issued by {fields.get('issuer', '?').strip()}"
+
+    if days < 0:
+        return Check(name, FAIL, f"{issuer}, EXPIRED {expires:%Y-%m-%d}")
+    detail = f"{issuer}, expires {expires:%Y-%m-%d} ({days:.0f} days)"
+    if not self_signed and days < _TLS_WARN_DAYS:
+        return Check(
+            name, WARN,
+            detail + " -- automatic renewal is not working "
+            "(sudo certbot renew --dry-run; journalctl -u certbot)",
+        )
+    return Check(name, OK, detail)
+
+
 # ---------------------------------------------------------------------------
 # running them
 # ---------------------------------------------------------------------------
@@ -522,6 +573,7 @@ def run_all(conn: sqlite3.Connection, *, skip_remote: bool = False) -> Report:
         ("administrators", lambda: check_administrators(conn)),
         ("waiting queues", lambda: check_queues(conn)),
         ("single sign-on", lambda: check_sso(conn)),
+        ("TLS certificate", lambda: check_tls_certificate(conn)),
     ):
         try:
             checks.append(run())

@@ -209,22 +209,49 @@ the Pi answers to: its fully qualified name, its short name, that name with
 matters once there are passwords on the wire. It does **not authenticate the
 server**, so browsers warn until it is trusted.
 
-Two ways to fix that, in order of preference:
+Three ways to fix that, in order of preference:
 
-1. **Get a certificate from RIT ITS** for the DNS name. Install it as
+1. **Let's Encrypt**, via `sudo deploy/enable-letsencrypt.sh` (try
+   `--dry-run` first). Needs a public DNS name and nothing from ITS. It
+   renews itself.
+2. **Get a certificate from RIT ITS** for the DNS name. Install it as
    `/etc/ssl/stockroom/stockroom.crt` and `.key`, then
    `sudo systemctl reload nginx` — the paths are already what nginx reads, so
-   there is no configuration change. This is the real answer, it needs no
-   client-side work at all, and it is the same conversation as SSO.
-2. **Trust the self-signed certificate** on the handful of stockroom machines.
+   there is no configuration change. The catch is renewal: public
+   certificates are capped at 200 days (100 from March 2027), so this is a
+   ticket a few times a year.
+3. **Trust the self-signed certificate** on the handful of stockroom machines.
    Copy `/etc/ssl/stockroom/stockroom.crt` and install it as a trusted root.
 
-Be honest about option 2's cost: teaching people to click through certificate
-warnings is a habit that hurts them elsewhere. Prefer option 1.
+Be honest about option 3's cost: teaching people to click through certificate
+warnings is a habit that hurts them elsewhere.
 
-Let's Encrypt is not an option here and is not worth attempting: HTTP-01
-requires the Pi to be reachable from the internet, which is a stated non-goal,
-and DNS-01 requires write access to the `rit.edu` zone, which is ITS's.
+### How Let's Encrypt works on a campus-only Pi
+
+This used to say Let's Encrypt was impossible, on the grounds that HTTP-01
+needs the Pi reachable from the internet. That conflated two firewalls. RIT's
+border does not filter port 80 for this host; **ufw on the Pi** does
+(`harden-pi.sh`), and that one is ours to move.
+
+So the certbot hooks (`deploy/stockroom-acme-hook.sh`) open port 80 to
+everyone for the seconds a renewal takes, roughly every two months, and close
+it again whether the renewal worked or not. Port 443 and SSH never change.
+In that window the world can reach nginx's port-80 block only: the challenge
+file, a redirect to an HTTPS port it still cannot reach, and `/public/`.
+
+- **`close` removes only a rule `open` added.** `harden-pi.sh --any` writes
+  its own `allow 80/tcp`; deleting that at the first renewal would silently
+  cut the stockroom's HTTP off.
+- **The certificate is copied, not linked.** The deploy hook installs it at
+  the same `/etc/ssl/stockroom/` paths, so nginx, `setup-pi.sh` and SSO are
+  untouched. The self-signed pair is kept as `*.self-signed`; the header of
+  `enable-letsencrypt.sh` says how to go back.
+- **`stockroom doctor` watches the expiry.** certbot renews with thirty days
+  left; under twenty-one, doctor warns that renewal has stopped. Let's
+  Encrypt no longer sends expiry mail, so this is the only notice you get.
+- **If RIT ever filter inbound port 80,** renewal fails and doctor says so
+  three weeks ahead. The fix then is DNS-01 (an ITS CNAME for
+  `_acme-challenge`) or option 2.
 
 ### Two failures that look identical and are not
 

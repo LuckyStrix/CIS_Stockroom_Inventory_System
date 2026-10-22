@@ -789,3 +789,140 @@ def test_the_public_page_falls_back_to_the_application():
             "the last try_files argument must be a named location to fall "
             "back to, not a status code"
         )
+
+
+# ---------------------------------------------------------------------------
+# Let's Encrypt
+# ---------------------------------------------------------------------------
+
+_ACME_HOOK = _DEPLOY / "stockroom-acme-hook.sh"
+_ENABLE_LE = _DEPLOY / "enable-letsencrypt.sh"
+
+
+def test_the_acme_challenge_is_answered_over_plain_http():
+    """HTTP-01 is fetched from port 80, and only port 80 is opened for it.
+
+    Redirected to HTTPS, the validator lands on 443 -- which ufw still refuses
+    from off campus -- and certbot reports a timeout that names neither.
+    """
+    port80 = _NGINX.read_text().split("listen 443", 1)[0]
+    match = re.search(r"location\s+\^~\s+/\.well-known/acme-challenge/\s*\{(.*?)\}",
+                      port80, re.S)
+    assert match, "the port-80 server block must serve the ACME challenge"
+    assert "return 301" not in match.group(1)
+    assert "root /var/www/acme;" in match.group(1)
+
+
+def test_the_installer_registers_all_three_hooks():
+    body = _ENABLE_LE.read_text()
+    for flag, verb in (("--pre-hook", "open"), ("--post-hook", "close"),
+                       ("--deploy-hook", "install")):
+        assert re.search(rf'{flag} "\$HOOK {verb}"', body), f"{flag} is missing"
+
+
+@pytest.fixture
+def fake_ufw(tmp_path):
+    """A `ufw` that records what it was asked and reports what it was told."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "ufw.log"
+    status = tmp_path / "ufw.status"
+    status.write_text("Status: active\n")
+    script = bin_dir / "ufw"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = status ]; then cat "{status}"; exit 0; fi\n'
+        f'echo "$*" >> "{log}"\n'
+    )
+    script.chmod(0o755)
+
+    def run(verb: str) -> list[str]:
+        env = {"PATH": f"{bin_dir}:/usr/bin:/bin",
+               "STOCKROOM_ACME_MARKER": str(tmp_path / "marker")}
+        subprocess.run(["bash", str(_ACME_HOOK), verb], env=env, check=True,
+                       capture_output=True, timeout=30)
+        return log.read_text().splitlines() if log.exists() else []
+
+    run.status = status
+    return run
+
+
+def test_the_hook_opens_port_80_and_closes_it_again(fake_ufw):
+    assert fake_ufw("open") == ["allow 80/tcp comment ACME challenge (temporary)"]
+    assert fake_ufw("close")[-1] == "delete allow 80/tcp"
+
+
+def test_close_never_removes_a_rule_it_did_not_add(fake_ufw):
+    """harden-pi.sh --any writes its own `allow 80/tcp`.
+
+    A close that deleted it unconditionally would shut the stockroom's HTTP
+    off at the first renewal, and nothing would say why.
+    """
+    fake_ufw.status.write_text(
+        "Status: active\n\n"
+        "To                         Action      From\n"
+        "--                         ------      ----\n"
+        "80/tcp                     ALLOW       Anywhere\n"
+    )
+    assert fake_ufw("open") == []
+    assert fake_ufw("close") == []
+
+
+def test_a_close_with_nothing_opened_does_nothing(fake_ufw):
+    assert fake_ufw("close") == []
+
+
+# ---------------------------------------------------------------------------
+# stockroom doctor: the certificate nginx serves
+# ---------------------------------------------------------------------------
+
+
+def _openssl(*args: str) -> None:
+    subprocess.run(["openssl", *args], check=True, capture_output=True, timeout=60)
+
+
+def _ca_signed_cert(tmp_path: Path, days: int) -> Path:
+    _openssl("req", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "30",
+             "-subj", "/CN=Test CA", "-keyout", str(tmp_path / "ca.key"),
+             "-out", str(tmp_path / "ca.crt"))
+    _openssl("req", "-nodes", "-newkey", "rsa:2048", "-subj", "/CN=stockroom.test",
+             "-keyout", str(tmp_path / "leaf.key"), "-out", str(tmp_path / "leaf.csr"))
+    _openssl("x509", "-req", "-in", str(tmp_path / "leaf.csr"),
+             "-CA", str(tmp_path / "ca.crt"), "-CAkey", str(tmp_path / "ca.key"),
+             "-CAcreateserial", "-days", str(days), "-out", str(tmp_path / "leaf.crt"))
+    return tmp_path / "leaf.crt"
+
+
+def test_doctor_says_nothing_about_a_machine_without_nginx(tmp_path, monkeypatch):
+    from stockroom import diagnostics
+    monkeypatch.setattr(diagnostics, "TLS_CERT", tmp_path / "absent.crt")
+    assert diagnostics.check_tls_certificate().status == diagnostics.OK
+
+
+def test_doctor_does_not_nag_about_a_self_signed_certificate(tmp_path, monkeypatch):
+    """Browsers already complain about it; an always-on warning teaches people
+    to ignore the colour."""
+    from stockroom import diagnostics
+    _openssl("req", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "5",
+             "-subj", "/CN=stockroom.test", "-keyout", str(tmp_path / "k"),
+             "-out", str(tmp_path / "c"))
+    monkeypatch.setattr(diagnostics, "TLS_CERT", tmp_path / "c")
+    check = diagnostics.check_tls_certificate()
+    assert check.status == diagnostics.OK
+    assert "self-signed" in check.detail
+
+
+def test_doctor_notices_a_renewal_that_stopped(tmp_path, monkeypatch):
+    from stockroom import diagnostics
+    monkeypatch.setattr(diagnostics, "TLS_CERT", _ca_signed_cert(tmp_path, 10))
+    check = diagnostics.check_tls_certificate()
+    assert check.status == diagnostics.WARN
+    assert "certbot" in check.detail
+
+
+def test_doctor_is_content_with_a_fresh_certificate(tmp_path, monkeypatch):
+    from stockroom import diagnostics
+    monkeypatch.setattr(diagnostics, "TLS_CERT", _ca_signed_cert(tmp_path, 80))
+    check = diagnostics.check_tls_certificate()
+    assert check.status == diagnostics.OK
+    assert "Test CA" in check.detail
