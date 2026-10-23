@@ -12,6 +12,7 @@ checking what the database thinks is going on.
     stockroom history --item 12          one item's full history
     stockroom checkout 12 alice@rit.edu --qty 2
     stockroom return 45
+    stockroom archive CIS-000005 CIS-000008 --reason "..."   dry run; --commit applies
     stockroom publish                    rebuild the public page now
     stockroom backup                     snapshot the database
     stockroom status                     headline numbers
@@ -175,6 +176,54 @@ def cmd_return(args) -> int:
         return 1
     print(f"Returned {args.qty or loan.quantity} x {loan.item_name} from {loan.person_name}")
     _publish(quiet=False)
+    return 0
+
+
+def cmd_archive(args) -> int:
+    """Archive several items at once, after a stocktake or a reconciliation.
+
+    Behaves like ``import``: a dry run unless ``--commit``, and all or
+    nothing. A mistyped barcode halfway down the list would otherwise leave
+    the first half archived and the operator working out which half.
+    """
+    conn = _conn()
+    actor = _actor(args)
+    archived: list[str] = []
+    errors: list[str] = []
+
+    class _Rollback(Exception):
+        """Abandon the transaction: a dry run, or any item refused."""
+
+    try:
+        # archive_item's own transaction joins this one, so every item
+        # commits together or not at all.
+        with db.transaction(conn):
+            for token in args.items:
+                try:
+                    item = _resolve_item(conn, token)
+                    service.archive_item(
+                        conn, actor=actor, item_id=item.id, reason=args.reason or ""
+                    )
+                    archived.append(f"{item.barcode or item.id}  {item.name}")
+                except StockroomError as exc:
+                    errors.append(f"{token}: {exc}")
+            if errors or not args.commit:
+                raise _Rollback
+    except _Rollback:
+        pass
+
+    committed = args.commit and not errors
+    verb = "Archived" if committed else "Dry run -- would archive"
+    print(f"{verb} {len(archived)} item(s), {len(errors)} error(s).")
+    for line in archived:
+        print(f"  {line}")
+    for line in errors:
+        print(f"  ERROR  {line}")
+    if errors:
+        print("Nothing was archived.", file=sys.stderr)
+        return 1
+    if committed:
+        _publish(quiet=False)
     return 0
 
 
@@ -798,6 +847,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--qty", type=int, help="partial return quantity")
     p.add_argument("--note")
     p.set_defaults(func=cmd_return)
+
+    p = sub.add_parser("archive", help="archive items (dry run unless --commit)")
+    p.add_argument("items", nargs="+", metavar="item", help="item id or barcode")
+    p.add_argument("--reason", help="recorded in the audit log for every item")
+    p.add_argument("--commit", action="store_true",
+                   help="actually archive (default is a dry run)")
+    p.set_defaults(func=cmd_archive)
 
     p = sub.add_parser("loans", help="list open loans")
     p.add_argument("--overdue", action="store_true")

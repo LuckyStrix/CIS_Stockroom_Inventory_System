@@ -94,6 +94,7 @@ stockroom checkout CIS-000142 alice@rit.edu --qty 2
 stockroom return 45 --qty 1      # partial return
 stockroom history --item 12      # one item's full history
 stockroom import stock.csv       # dry run; add --commit to apply
+stockroom archive CIS-000005 CIS-000008 --reason "gone"   # likewise; all or nothing
 stockroom export > backup.csv
 stockroom publish                # rebuild the public page
 stockroom backup                 # snapshot it, verify it, send it off the Pi
