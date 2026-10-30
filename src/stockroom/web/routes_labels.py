@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse
 
 from .. import labelprinter, service
@@ -79,11 +79,17 @@ def _section_rows(conn, *, unit: str, shelf: str, with_units: bool):
 
 
 @router.get("/labels/choose", response_class=HTMLResponse)
-def choose(request: Request, unit: str = "", shelf: str = "", units: str = ""):
+def choose(request: Request, unit: str = "", shelf: str = "",
+           units: list[str] = Query([])):
     """Pick a storage unit and shelf, tick what needs a label."""
     require_staff(request)
     conn = get_conn()
-    with_units = units == "1"
+    # Units' asset tags are included unless asked not to be: off by default,
+    # a whole class of labels went unprinted without anyone noticing they
+    # were missing, which is worse than unticking a row that already has a
+    # sticker. The form sends a hidden "0" before the checkbox's "1", because
+    # an unticked box sends nothing and nothing has to mean "the default".
+    with_units = "1" in units if units else True
     in_unit = service.list_items(conn, unit=unit) if unit else []
     shelves = sorted({i.shelf for i in in_unit if i.shelf}, key=str.lower)
     if shelf not in shelves:
@@ -103,7 +109,7 @@ def choose(request: Request, unit: str = "", shelf: str = "", units: str = ""):
         sheet_url="/labels?ids=" + ",".join(item_ids) if item_ids else "",
         next_url="/labels/choose?" + urlencode(
             {k: v for k, v in (("unit", unit), ("shelf", shelf),
-                               ("units", "1" if with_units else "")) if v}
+                               ("units", "1" if with_units else "0")) if v}
         ),
     )
 

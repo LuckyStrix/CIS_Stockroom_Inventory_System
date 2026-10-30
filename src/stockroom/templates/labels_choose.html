@@ -28,9 +28,11 @@
       {% endfor %}
     </select>
     {% endif %}
+    {# The hidden 0 is what an unticked box sends: see routes_labels.choose. #}
+    <input type="hidden" name="units" value="0">
     <label class="inline small">
       <input type="checkbox" name="units" value="1" {% if with_units %}checked{% endif %}>
-      Individual units’ asset tags too
+      Also a label for each unit with an asset tag
     </label>
     <button class="btn secondary">Show</button>
   </form>

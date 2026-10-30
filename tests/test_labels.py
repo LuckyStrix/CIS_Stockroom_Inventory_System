@@ -354,13 +354,23 @@ def test_the_chooser_narrows_to_a_shelf_in_shelf_order(client, shelf):
     assert "Beamsplitter" in page and "Zoom lens" not in page
 
 
-def test_the_chooser_can_include_units_by_asset_tag(client, shelf, conn_for_client):
+def test_the_chooser_includes_units_by_asset_tag_unless_unticked(client, shelf, conn_for_client):
     camera = service.create_item(conn_for_client, actor=SETUP, name="Nikon D850",
                                  unit="Cabinet A", shelf="Shelf 1", tracked=True)
     service.create_unit(conn_for_client, actor=SETUP, item_id=camera.id,
                         asset_tag="AT-0042", serial="3012345")
-    assert "AT-0042" not in client.get("/labels/choose?unit=Cabinet+A").text
-    assert "AT-0042" in client.get("/labels/choose?unit=Cabinet+A&units=1").text
+    # On by default; the form's hidden 0 alone (box unticked) turns it off,
+    # and the 0 followed by the box's 1 (ticked) keeps it on.
+    assert "AT-0042" in client.get("/labels/choose?unit=Cabinet+A").text
+    assert "AT-0042" not in client.get("/labels/choose?unit=Cabinet+A&units=0").text
+    assert "AT-0042" in client.get("/labels/choose?unit=Cabinet+A&units=0&units=1").text
+
+
+def test_unticking_units_survives_the_round_trip_through_printing(client, shelf, printer):
+    """After a batch the chooser comes back the way it was left."""
+    page = client.get("/labels/choose?unit=Cabinet+A&units=0").text
+    back = re.search(r'name="next" value="([^"]+)"', page).group(1)
+    assert "units=0" in back.replace("&amp;", "&")
 
 
 def test_without_a_printer_the_chooser_offers_the_sheet_only(client, shelf):
