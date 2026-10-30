@@ -51,6 +51,7 @@ from . import (
     routes_auth,
     routes_history,
     routes_items,
+    routes_labels,
     routes_loans,
     routes_people,
     routes_requests,
@@ -741,6 +742,7 @@ def public_page(path: str = ""):
 # ---------------------------------------------------------------------------
 app.include_router(routes_auth.router)
 app.include_router(routes_items.router)
+app.include_router(routes_labels.router)
 app.include_router(routes_loans.router)
 app.include_router(routes_people.router)
 app.include_router(routes_history.router)

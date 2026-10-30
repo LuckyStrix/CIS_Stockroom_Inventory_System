@@ -27,6 +27,9 @@ def temp_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PUBLISH_DIR", tmp_path / "publish")
     monkeypatch.setattr(config, "GITHUB_PAGES_DIR", None)
     monkeypatch.setattr(config, "PUBLIC_SHOW_BORROWERS", False)
+    # Never the real printer. On the Pi itself /dev/stockroom-label exists, and
+    # the suite would otherwise feed it a label for every item page rendered.
+    monkeypatch.setattr(config, "LABEL_PRINTER", str(tmp_path / "no-label-printer"))
     # No background publishing during tests unless a test asks for it.
     service.set_change_listener(None)
     yield tmp_path

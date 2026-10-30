@@ -1,0 +1,14 @@
+# The stockroom's Brother QL label printer, by a name that does not move.
+#
+# Installed to /etc/udev/rules.d/ by deploy/setup-pi.sh. The kernel's usblp
+# driver numbers printers in the order they appear, so /dev/usb/lp0 is "the
+# label printer" only until something else is plugged in first. This gives
+# it /dev/stockroom-label, which is STOCKROOM_LABEL_PRINTER's default.
+#
+# GROUP/MODE restate usblp's own defaults (root:lp 0660) so that the service
+# account's membership of `lp` is the whole permission story.
+#
+# Only the QL-500 (04f9:2015) has been tested. Another QL model is very likely
+# to work -- they share the raster protocol -- and adding it is one more line
+# with the product ID that `lsusb` prints for it.
+SUBSYSTEM=="usbmisc", KERNEL=="lp[0-9]*", ATTRS{idVendor}=="04f9", ATTRS{idProduct}=="2015", SYMLINK+="stockroom-label", GROUP="lp", MODE="0660"

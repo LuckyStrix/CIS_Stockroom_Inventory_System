@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
-from .. import barcodes, csvio, kits, search, service
+from .. import barcodes, csvio, kits, labelprinter, search, service
 from ..models import HOLD_STATE_LABELS
 # Starlette's UploadFile, not FastAPI's. request.form() constructs the base
 # class, and fastapi.UploadFile is a *subclass* of it -- so an isinstance check
@@ -174,6 +174,7 @@ def item_detail(request: Request, item_id: int):
             # and would happily offer a camera that is already lent out.
             lendable_units=[u for u in units if u.is_lendable],
             hold_states=HOLD_STATE_LABELS,
+            label_printer=labelprinter.connected(),
         )
 
     return page(request, "item_detail.html", **context)

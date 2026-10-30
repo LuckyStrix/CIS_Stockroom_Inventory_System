@@ -94,7 +94,8 @@ including whether any of them are leaving the machine.
 
 **Items → Add item.** A barcode is assigned automatically unless you type one
 (scan the manufacturer's barcode into the field to use that instead). Then
-print its label from the item page.
+print its label from the item page (**Print label**, with the label printer
+plugged into the Pi), or a whole shelf's from **Items → Print labels**.
 
 ### Add a photo
 
@@ -179,6 +180,9 @@ stockroom backup                      # snapshot the database now
 stockroom prune                       # drop expired sessions and old login attempts
 stockroom doctor                      # health checks; non-zero if something is wrong
 stockroom report --days 365           # usage figures, same numbers as /reports
+stockroom label status                # label printer ready? what tape?
+stockroom label print CIS-000142 AT-7 # by barcode or asset tag; Enter between labels
+stockroom label print --test          # one sample label
 
 stockroom user list                   # accounts, pending first
 stockroom user approve an1234@rit.edu
@@ -401,6 +405,22 @@ curl -s localhost:8000/health
 ```
 If `/health` answers on the Pi but not from your laptop, it is the network or
 mDNS — try the IP address directly.
+
+**The label printer button is missing, or says it is not plugged in.**
+```bash
+ls -l /dev/stockroom-label /dev/usb/lp*   # is the name there?
+lsusb | grep -i brother                   # does the Pi see it at all?
+stockroom label status
+```
+No `/dev/stockroom-label` but an `lp0`: the model is not in
+`deploy/99-stockroom-label.rules` — add its product ID from `lsusb` there and
+re-run the installer, or set `STOCKROOM_LABEL_PRINTER="/dev/usb/lp0"`.
+`label status` works but the web page says "not plugged in": the service is
+not allowed the device — check `DeviceAllow=char-usb rw` is in
+`/etc/systemd/system/stockroom.service`, and that `id stockroom` lists `lp`
+(then `sudo systemctl restart stockroom`, which is when group membership is
+read). A strip that comes out blank or shifted means tape the app does not
+know; `stockroom label status` names what the printer reported.
 
 **The public page is stale or missing.** Regenerate it: `stockroom publish`. If that
 works but automatic updates do not, look for `publish failed` in

@@ -32,8 +32,10 @@ say "Installing system packages"
 apt-get update -qq
 # sqlite3 is only for poking at the database by hand; the app uses Python's
 # built-in module. git is needed only for the optional Pages publisher.
+# fonts-dejavu-core is what the label printer draws its text with.
 apt-get install -y --no-install-recommends \
-    python3 python3-venv python3-pip sqlite3 git rsync avahi-daemon nginx openssl rclone
+    python3 python3-venv python3-pip sqlite3 git rsync avahi-daemon nginx openssl rclone \
+    fonts-dejavu-core
 
 say "Creating the ${SERVICE_USER} service account"
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
@@ -41,6 +43,24 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
     echo "created"
 else
     echo "already exists"
+fi
+
+say "Setting up the label printer"
+# The Brother QL label printer is optional and this is harmless without one.
+# Three things, all needed: the service account in `lp` (usblp creates the
+# device root:lp 0660), a udev rule giving the printer a name that does not
+# change when something else is plugged in, and -- in stockroom.service --
+# DeviceAllow for USB printers, since the unit otherwise sees no devices.
+usermod -aG lp "$SERVICE_USER"
+install -m 0644 "$REPO_DIR/deploy/99-stockroom-label.rules" /etc/udev/rules.d/
+udevadm control --reload
+# Re-run the rules over a printer that is already plugged in, so the name
+# appears now rather than at the next replug.
+udevadm trigger --subsystem-match=usbmisc --action=add
+if [[ -e /dev/stockroom-label ]]; then
+    echo "found a label printer at /dev/stockroom-label"
+else
+    echo "no label printer plugged in (plug it in any time; nothing to re-run)"
 fi
 
 say "Installing the application to ${APP_DIR}"
@@ -379,7 +399,9 @@ cat <<EOF
     1. Sign in and import existing stock:
          stockroom import stock.csv
          (add --commit once the dry run looks right)
-    2. Print barcode labels from  https://${SITE_HOST}/labels
+    2. Print barcode labels from  https://${SITE_HOST}/labels/choose
+         (plug the Brother label printer into the Pi; check it with
+          stockroom label status  and  stockroom label print --test)
     3. LOCK THE PI DOWN -- this script has not done it:
          sudo ./deploy/harden-pi.sh
          (allows 22/80/443 from the campus network, eduroam included;

@@ -33,7 +33,19 @@ TimeoutStopSec=20
 # what stops it becoming a foothold on the rest of the machine.
 NoNewPrivileges=yes
 PrivateTmp=yes
-PrivateDevices=yes
+# Devices: the pseudo-devices every process needs (DevicePolicy=closed lets
+# /dev/null, /dev/urandom and friends through), plus USB printers -- char
+# major 180, which /proc/devices calls "usb" -- for the label printer. That
+# is all. This used to be PrivateDevices=yes, which builds a /dev with no
+# printer in it at all; the label button then reported "not plugged in" for a
+# printer sitting on the desk with its light on. A device policy instead of a
+# private /dev also copes with the printer being plugged in after the service
+# started, which a bind-mounted device node would not.
+#
+# The other half is the `lp` group: setup-pi.sh adds the service account to
+# it, and systemd reads group membership at start.
+DevicePolicy=closed
+DeviceAllow=char-usb rw
 ProtectSystem=strict
 ProtectHome=yes
 ProtectKernelTunables=yes

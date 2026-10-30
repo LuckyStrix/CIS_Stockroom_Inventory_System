@@ -173,6 +173,7 @@ dl.kv dd{margin:0}
 .headrow{display:flex;justify-content:space-between;align-items:flex-start;
   gap:12px;flex-wrap:wrap;margin-bottom:4px}
 .mt{margin-top:16px}
+.mb{margin-bottom:16px}
 .flush{margin-bottom:0}
 .center{text-align:center}
 .small{font-size:.85rem}

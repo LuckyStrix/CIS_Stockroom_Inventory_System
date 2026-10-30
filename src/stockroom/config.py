@@ -23,6 +23,8 @@ Environment variables (all optional):
                                       typed dates and printing stored ones
                                       (default America/New_York)
     STOCKROOM_BARCODE_PREFIX          default "CIS"
+    STOCKROOM_LABEL_PRINTER           the Brother QL label printer's device
+                                      (default /dev/stockroom-label; "" = off)
     STOCKROOM_PUBLISH_DEBOUNCE        seconds to coalesce republishes (default 2.0)
     STOCKROOM_ALLOWED_HOSTS           comma-separated Host values to accept
     STOCKROOM_ALLOW_IP_HOSTS          "0" to reject a Host that is a bare IP
@@ -284,6 +286,14 @@ TIMEZONE = _load_timezone(TIMEZONE_NAME)
 
 BARCODE_PREFIX: str = os.environ.get("STOCKROOM_BARCODE_PREFIX", "CIS")
 BARCODE_DIGITS: int = 6  # CIS-000142
+
+# The label printer on the Pi's USB port (see labelprinter.py). The default is
+# the stable name deploy/99-stockroom-label.rules gives a Brother QL, rather
+# than /dev/usb/lp0, because usblp numbers printers in the order they appear
+# and a second one plugged in would otherwise swap them. Nothing is printed
+# and no button is shown unless the device actually exists, so a Pi without a
+# printer needs no setting; "" switches the feature off outright.
+LABEL_PRINTER: str = os.environ.get("STOCKROOM_LABEL_PRINTER", "/dev/stockroom-label").strip()
 
 # A burst of changes (a CSV import, rapid check-ins) should render the public
 # site once, not once per row.

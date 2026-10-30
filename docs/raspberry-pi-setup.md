@@ -180,9 +180,34 @@ Test it: open the dashboard, scan a label, and the page should jump to that
 item. The search box is focused automatically for this reason, so scanning
 works the moment the page loads.
 
-Print labels for everything from `https://cis-stockroom.local/labels`.
-The sheet is laid out for Avery 5160 (3 × 10, 2.625" × 1"). **Print at 100%
-scale with page scaling off** — a scaled barcode may not scan.
+## 6b. The label printer
+
+A Brother QL-500 (or another QL) plugs into the **Pi**, not into anybody's
+laptop, so it prints from whatever phone or computer staff are using.
+`setup-pi.sh` has already done the setup — the `lp` group, a udev rule naming
+it `/dev/stockroom-label`, and the systemd device allowance — so: plug it in,
+switch it on, load DK tape (29 mm or wider; 62 mm continuous is a good
+default), then
+
+```bash
+stockroom label status          # "Ready at /dev/stockroom-label, 62 mm continuous tape loaded."
+stockroom label print --test    # one sample label: scan it to check the scanner too
+```
+
+Then **Items → Print labels** (`/labels/choose`): pick a storage unit and
+shelf, untick anything already labelled, print. The labels come out in shelf
+order, **one at a time** — the QL-500 has no cutter, so after each one, cut it
+off and press **Print next**. *Print all without stopping* is for die-cut
+tape, which needs no cutting. Each item page has a **Print label** button, and
+each tracked unit a **Label** button for its asset tag.
+
+The printer reads its tape back to the app, so changing rolls needs no
+setting. If a label will not print the page says why (cover open, no tape,
+tape too narrow); `stockroom doctor` reports the same.
+
+**No label printer?** The same page offers an office-printer sheet instead,
+laid out for Avery 5160 (3 × 10, 2.625" × 1"). **Print at 100% scale with page
+scaling off** — a scaled barcode may not scan.
 
 ## 7. Optional: mirror to GitHub Pages
 

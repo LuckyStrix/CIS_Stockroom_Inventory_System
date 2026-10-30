@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Print labels{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>Print labels</h1>
+    <p class="lede">
+      Pick a cabinet and shelf, untick anything that already has a label, and
+      print. Labels come out in shelf order, one at a time.
+    </p>
+  </div>
+</div>
+
+<div class="filters">
+  <form method="get" action="/labels/choose">
+    <select name="unit" aria-label="Storage unit">
+      <option value="">Every storage unit</option>
+      {% for u in storage_units %}
+      <option value="{{ u }}" {% if u == unit %}selected{% endif %}>{{ u }}</option>
+      {% endfor %}
+    </select>
+    {% if shelves %}
+    <select name="shelf" aria-label="Shelf">
+      <option value="">Every shelf</option>
+      {% for s in shelves %}
+      <option value="{{ s }}" {% if s == shelf %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    {% endif %}
+    <label class="inline small">
+      <input type="checkbox" name="units" value="1" {% if with_units %}checked{% endif %}>
+      Individual units’ asset tags too
+    </label>
+    <button class="btn secondary">Show</button>
+  </form>
+</div>
+
+{% if not printer %}
+<div class="card attention">
+  No label printer is connected to the stockroom computer, so these can only
+  go on an office-printer sheet. Plug the Brother printer into the Pi and
+  reload this page.
+</div>
+{% endif %}
+
+{% if rows %}
+<form method="post" action="/labels/print">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="next" value="{{ next_url }}">
+  <div class="actions mb">
+    {% if printer %}
+    <button class="btn">Print the ticked labels</button>
+    {% endif %}
+    {% if sheet_url %}
+    <a class="btn secondary" href="{{ sheet_url }}">Office-printer sheet instead</a>
+    {% endif %}
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Print?</th><th>Item</th><th>Code</th><th>Location</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>
+          <input type="checkbox" name="pick" value="{{ row.token }}" checked
+                 aria-label="Print a label for {{ row.code }}">
+        </td>
+        <td>
+          {{ row.item.name }}
+          {% if row.unit %}<div class="muted small">one unit{% if row.unit.serial %} · S/N {{ row.unit.serial }}{% endif %}</div>{% endif %}
+        </td>
+        <td class="mono">{{ row.code }}</td>
+        <td class="nowrap muted">{{ row.item.location }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</form>
+{% else %}
+<div class="empty">
+  Nothing here has a barcode yet. Assign one from the item’s page, then come
+  back.
+</div>
+{% endif %}
+
+{% endblock %}

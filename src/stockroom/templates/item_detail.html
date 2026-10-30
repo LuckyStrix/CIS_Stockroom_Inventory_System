@@ -19,7 +19,14 @@
   <div class="actions">
     {% if account.is_staff %}
       <a class="btn secondary" href="/items/{{ item.id }}/edit">Edit</a>
-      {% if item.barcode %}<a class="btn secondary" href="/labels?ids={{ item.id }}">Label</a>{% endif %}
+      {% if item.barcode and label_printer %}
+      <form method="post" action="/labels/print" class="inline">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="pick" value="i{{ item.id }}">
+        <input type="hidden" name="next" value="/items/{{ item.id }}">
+        <button class="btn secondary">Print label</button>
+      </form>
+      {% elif item.barcode %}<a class="btn secondary" href="/labels?ids={{ item.id }}">Label</a>{% endif %}
       <a class="btn secondary" href="/history?item_id={{ item.id }}">History</a>
     {% elif not item.is_archived %}
       <a class="btn" href="/requests/new/borrow?item_id={{ item.id }}">Request to borrow</a>
@@ -364,6 +371,14 @@
       </td>
       <td class="muted">{{ u.state_note or u.note or "—" }}</td>
       <td class="nowrap">
+        {% if u.asset_tag and label_printer and not u.is_retired %}
+        <form method="post" action="/labels/print" class="inline">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="pick" value="u{{ u.id }}">
+          <input type="hidden" name="next" value="/items/{{ item.id }}">
+          <button class="btn small secondary">Label</button>
+        </form>
+        {% endif %}
         <form method="post" action="/units/{{ u.id }}/retire"
               data-confirm="Retire {{ u.label }}? Its history is kept.">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">

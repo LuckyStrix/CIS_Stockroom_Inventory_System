@@ -296,6 +296,27 @@ python3-saml is an
 optional extra (`pip install -e '.[sso]'`), imported lazily, so the
 application starts and the suite runs without it.
 
+### The label printer
+
+`labelprinter.py` + `web/routes_labels.py`: a Brother QL on the Pi's USB
+port, driven directly -- no CUPS, no Brother driver (there is none for ARM).
+It writes the QL raster protocol to `/dev/stockroom-label`, a name given by
+`deploy/99-stockroom-label.rules`. Things that are not obvious:
+
+- **One label per job, deliberately.** The QL-500 has no cutter, and several
+  pages in one job come out as one unbroken strip. The web flow prints one,
+  then waits for "Print next"; the queue rides in the URL like the counter
+  basket, so nothing is stored. "Without stopping" is for die-cut tape.
+- **The service unit allows `char-usb`, it is not `PrivateDevices=yes`.** A
+  private `/dev` has no printer in it. `DevicePolicy=closed` keeps everything
+  else out, and copes with a printer plugged in after start.
+- **Every device access holds `flock()` on the device.** A status request
+  begins by flushing the printer's input, which would wreck a job another
+  process (`doctor`, the CLI) was half-way through sending.
+- **Bars are whole dots** (2-4 per module) or a thermal head smears them.
+- Printing writes nothing to the database, so it is not an audited mutation;
+  who printed what goes to the journal.
+
 ### Logs leave the machine too
 
 `logs.py` + `stockroom archive-logs`, in the nightly unit after the snapshot.

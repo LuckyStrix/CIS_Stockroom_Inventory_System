@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import accounts, backup_targets, config, db, service
+from . import accounts, backup_targets, config, db, labelprinter, service
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 
@@ -551,6 +551,29 @@ def check_tls_certificate(conn: sqlite3.Connection | None = None) -> Check:
     return Check(name, OK, detail)
 
 
+def check_label_printer(conn: sqlite3.Connection | None = None) -> Check:
+    """Whether the label printer, if there is one, could print right now.
+
+    The one check that talks to hardware. Asking for status writes a request
+    to the printer but changes nothing on it, so it keeps this module's
+    promise; it takes the same lock a print job does, so it cannot interrupt
+    one. A Pi with no printer plugged in is reported, not warned about -- the
+    printer is optional, and the sheet at /labels still works without it.
+    """
+    name = "label printer"
+    path = labelprinter.device_path()
+    if path is None:
+        return Check(name, OK, "switched off (STOCKROOM_LABEL_PRINTER is empty)")
+    if not path.exists():
+        return Check(name, OK, f"none connected at {path}")
+    try:
+        status = labelprinter.status()
+        tape = status.usable_tape()
+    except labelprinter.LabelPrinterError as exc:
+        return Check(name, WARN, str(exc))
+    return Check(name, OK, f"ready, {tape.name} tape loaded")
+
+
 # ---------------------------------------------------------------------------
 # running them
 # ---------------------------------------------------------------------------
@@ -574,6 +597,7 @@ def run_all(conn: sqlite3.Connection, *, skip_remote: bool = False) -> Report:
         ("waiting queues", lambda: check_queues(conn)),
         ("single sign-on", lambda: check_sso(conn)),
         ("TLS certificate", lambda: check_tls_certificate(conn)),
+        ("label printer", lambda: check_label_printer(conn)),
     ):
         try:
             checks.append(run())

@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Printing labels{% endblock %}
+{% block content %}
+
+<div class="headrow">
+  <div>
+    <h1>Printing labels</h1>
+    <p class="lede">{{ done }} of {{ total }} printed.</p>
+  </div>
+</div>
+
+<div class="card attention">
+  <h2>Cut that one off, then print the next</h2>
+  {% if upcoming %}
+  <p>
+    Next: <strong>{{ upcoming.title }}</strong>
+    <span class="mono">{{ upcoming.code }}</span>
+    {% if upcoming.subtitle %}<span class="muted"> · {{ upcoming.subtitle }}</span>{% endif %}
+  </p>
+  {% endif %}
+  {% if not printer %}
+  <p class="muted">The label printer is not connected right now.</p>
+  {% endif %}
+
+  <div class="actions">
+    <form method="post" action="/labels/print" class="inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="queue" value="{{ queue }}">
+      <input type="hidden" name="done" value="{{ done }}">
+      <input type="hidden" name="total" value="{{ total }}">
+      <input type="hidden" name="next" value="{{ back }}">
+      {# autofocus, so Enter or a tap anywhere sensible prints the next one. #}
+      <button class="btn" autofocus>Print next</button>
+    </form>
+    {% if remaining > 1 %}
+    <form method="post" action="/labels/print-rest" class="inline"
+          data-confirm="Print all {{ remaining }} as one strip without stopping?">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="queue" value="{{ queue }}">
+      <input type="hidden" name="next" value="{{ back }}">
+      <button class="btn secondary">Print all {{ remaining }} without stopping</button>
+    </form>
+    {% endif %}
+    <a class="btn secondary" href="{{ back }}">Stop</a>
+  </div>
+  <p class="muted small mt">
+    Without stopping is for die-cut labels, which peel off their backing and
+    need no cutting.
+  </p>
+</div>
+
+{% endblock %}

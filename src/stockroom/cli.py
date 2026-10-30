@@ -18,6 +18,8 @@ checking what the database thinks is going on.
     stockroom status                     headline numbers
     stockroom doctor                     check the system is still healthy
     stockroom report                     usage, and what nobody borrows
+    stockroom label status               is the label printer ready, what tape
+    stockroom label print CIS-000142     print labels by barcode or asset tag
 
     stockroom user create --admin        make the first administrator
     stockroom user list                  accounts, pending first
@@ -561,6 +563,81 @@ def cmd_sso_check(args) -> int:
     return 0
 
 
+def cmd_label_status(args) -> int:
+    """Say whether the label printer is there and what tape it has."""
+    from . import labelprinter
+
+    path = labelprinter.device_path()
+    if path is None:
+        print("Label printing is switched off (STOCKROOM_LABEL_PRINTER is empty).")
+        return 1
+    if not path.exists():
+        print(f"No label printer at {path}. Is it plugged in and switched on?")
+        return 1
+    try:
+        status = labelprinter.status()
+        tape = status.usable_tape()
+    except labelprinter.LabelPrinterError as exc:
+        print(exc)
+        return 1
+    print(f"Ready at {path}, {tape.name} tape loaded.")
+    return 0
+
+
+def cmd_label_print(args) -> int:
+    """Print labels for items or units, named by barcode or asset tag."""
+    from . import labelprinter
+
+    conn = _conn()
+    if args.test:
+        labels = [labelprinter.Label(
+            f"{config.BARCODE_PREFIX}-{0:0{config.BARCODE_DIGITS}d}",
+            "Test label", "If this scans, the printer is set up",
+        )]
+    else:
+        labels = []
+        for code in args.codes:
+            # Exact lookups, not search.resolve(): its last resort is a text
+            # search, and a typo that happens to match one item would print
+            # that item's label without a word. An asset tag prints the unit's
+            # own label, which is what the scan box takes it back to.
+            item = service.get_item_by_barcode(conn, code)
+            if item is not None:
+                labels.append(labelprinter.for_item(item))
+                continue
+            unit = service.get_unit_by_asset_tag(conn, code)
+            if unit is None:
+                print(f"No item or unit has the code {code!r}.", file=sys.stderr)
+                return 1
+            labels.append(labelprinter.for_unit(unit, service.get_item(conn, unit.item_id)))
+        if not labels:
+            print("Name at least one barcode or asset tag, or use --test.", file=sys.stderr)
+            return 1
+    # One job per label, waiting for Enter in between: the QL-500 has no
+    # cutter, and several labels in one job come out as one unbroken strip.
+    # Not waiting is for die-cut labels, or for a script with no one to press
+    # Enter.
+    by = _actor(args).name
+    pause = not args.no_pause and sys.stdin.isatty() and len(labels) > 1
+    count = 0
+    try:
+        if pause:
+            for index, label in enumerate(labels):
+                if index:
+                    answer = input(f"Cut it off, then Enter for {label.code} "
+                                   f"({index + 1} of {len(labels)}), or q to stop: ")
+                    if answer.strip().lower() == "q":
+                        break
+                count += labelprinter.print_labels([label], by=by)
+        else:
+            count = labelprinter.print_labels(labels, by=by)
+    except labelprinter.LabelPrinterError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(f"Printed {count} label(s).")
+    return 0
+
+
 def cmd_status(args) -> int:
     conn = _conn()
     info = service.summary(conn)
@@ -920,6 +997,23 @@ def build_parser() -> argparse.ArgumentParser:
     sso.add_parser(
         "check", help="say whether single sign-on is set up correctly"
     ).set_defaults(func=cmd_sso_check)
+
+    # -- label printer -----------------------------------------------------
+    label = sub.add_parser("label", help="the USB label printer").add_subparsers(
+        dest="label_command", required=True
+    )
+    label.add_parser(
+        "status", help="say whether the label printer is ready and what tape it has"
+    ).set_defaults(func=cmd_label_status)
+
+    p = label.add_parser("print", help="print labels by barcode or asset tag")
+    p.add_argument("codes", nargs="*", metavar="CODE")
+    p.add_argument("--test", action="store_true",
+                   help="print one sample label, to check the printer and a scanner")
+    p.add_argument("--no-pause", action="store_true",
+                   help="print every label as one strip instead of waiting to cut each")
+    p.add_argument("--actor", help="who is printing (for the journal)")
+    p.set_defaults(func=cmd_label_print)
 
     # -- accounts ----------------------------------------------------------
     user = sub.add_parser("user", help="manage accounts").add_subparsers(
