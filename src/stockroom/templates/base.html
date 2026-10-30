@@ -53,15 +53,23 @@
 </main>
 {% block scripts %}{% endblock %}
 
-{# The only script in the app. It replaces the inline onsubmit="confirm(...)"
-   handlers that a strict CSP forbids: any form carrying data-confirm asks
-   before it submits. Carries the per-request nonce, so nothing injected into
-   the page can execute alongside it. #}
+{# The only script in the app. It replaces the inline handlers that a strict
+   CSP forbids: any form carrying data-confirm asks before it submits, and any
+   form carrying data-autosubmit submits itself when one of its fields
+   changes -- a filter that applies as you pick, with its button kept in a
+   <noscript> for a browser without scripting. Carries the per-request nonce,
+   so nothing injected into the page can execute alongside it. #}
 <script nonce="{{ csp_nonce }}">
   document.addEventListener("submit", function (event) {
     var message = event.target.getAttribute("data-confirm");
     if (message && !window.confirm(message)) {
       event.preventDefault();
+    }
+  });
+  document.addEventListener("change", function (event) {
+    var form = event.target.form;
+    if (form && form.hasAttribute("data-autosubmit")) {
+      form.submit();
     }
   });
 </script>

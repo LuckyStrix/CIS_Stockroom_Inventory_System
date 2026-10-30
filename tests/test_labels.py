@@ -373,6 +373,21 @@ def test_unticking_units_survives_the_round_trip_through_printing(client, shelf,
     assert "units=0" in back.replace("&amp;", "&")
 
 
+def test_the_chooser_filters_apply_as_you_pick(client, shelf):
+    """No Show button to press: the shared script submits the form on change.
+
+    The button survives only inside <noscript>, and the script that does the
+    submitting is the nonce-carrying one in base.html -- an inline onchange
+    would be refused by the CSP without a word.
+    """
+    page = client.get("/labels/choose?unit=Cabinet+A").text
+    form = re.search(r'<form method="get" action="/labels/choose"[^>]*>', page).group(0)
+    assert "data-autosubmit" in form
+    assert re.search(r"<noscript>\s*<button[^>]*>Show</button>\s*</noscript>", page)
+    assert "onchange" not in page
+    assert 'hasAttribute("data-autosubmit")' in page
+
+
 def test_without_a_printer_the_chooser_offers_the_sheet_only(client, shelf):
     page = client.get("/labels/choose?unit=Cabinet+A").text
     assert "Print the ticked labels" not in page

@@ -13,7 +13,7 @@
 </div>
 
 <div class="filters">
-  <form method="get" action="/labels/choose">
+  <form method="get" action="/labels/choose" data-autosubmit>
     <select name="unit" aria-label="Storage unit">
       <option value="">Every storage unit</option>
       {% for u in storage_units %}
@@ -34,7 +34,7 @@
       <input type="checkbox" name="units" value="1" {% if with_units %}checked{% endif %}>
       Also a label for each unit with an asset tag
     </label>
-    <button class="btn secondary">Show</button>
+    <noscript><button class="btn secondary">Show</button></noscript>
   </form>
 </div>
 
