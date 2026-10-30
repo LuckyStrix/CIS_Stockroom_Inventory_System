@@ -204,9 +204,15 @@ class _Device:
         except FileNotFoundError:
             raise LabelPrinterError("The label printer is not plugged in.") from None
         except PermissionError:
+            # Two different locks answer with the same EPERM: the file mode
+            # (root:lp 0660) and the service unit's device policy. Naming only
+            # the first sent the reader to `id stockroom`, which looks fine,
+            # when what was missing was the unit's DeviceAllow line.
             raise LabelPrinterError(
                 f"No permission to use the label printer at {path}. The service "
-                f"account must be in the lp group (deploy/setup-pi.sh does this)."
+                f"account must be in the lp group, and stockroom.service must "
+                f"allow USB printers (DeviceAllow=char-usb rw); "
+                f"deploy/setup-pi.sh sets up both."
             ) from None
         deadline = time.monotonic() + wait
         while True:

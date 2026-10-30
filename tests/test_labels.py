@@ -253,6 +253,21 @@ def test_a_second_user_of_the_device_waits_its_turn(tmp_path):
     labelprinter._Device(device, wait=0).close()     # free again
 
 
+def test_a_refused_device_names_both_things_that_can_refuse_it(tmp_path):
+    """The lp group and the unit's device policy both answer EPERM.
+
+    The message once named only the group, which on the Pi looked fine,
+    while the thing a reader would actually have needed was DeviceAllow.
+    """
+    device = tmp_path / "lp"
+    device.touch()
+    device.chmod(0)
+    with pytest.raises(labelprinter.LabelPrinterError) as refused:
+        labelprinter._Device(device, wait=0)
+    assert "lp group" in str(refused.value)
+    assert "DeviceAllow=char-usb" in str(refused.value)
+
+
 def test_switched_off_is_not_an_error_anywhere(monkeypatch):
     monkeypatch.setattr(config, "LABEL_PRINTER", "")
     assert not labelprinter.connected()
